@@ -386,14 +386,21 @@ export const conformanceCases: readonly ConformanceCase[] = [
   ),
 
   testCase(
-    "deleteIfUnchanged reports false for a missing record",
+    "deleteIfUnchanged reports false for a record already gone",
     async (store) => {
       const collection = store.collection(widgets);
+      await collection.put(widget());
+      const seen = await collection.getVersioned(widgets.key(widget()));
+      if (seen === null) {
+        throw new Error("expected the record to exist");
+      }
+      assert.equal(await collection.delete(widgets.key(widget())), true);
+
+      // The token is one this store issued; the record it described is gone.
+      // Version tokens are opaque and backend-issued, so a token the store
+      // never minted is outside the contract and is not asserted here.
       assert.equal(
-        await collection.deleteIfUnchanged(
-          { partition: "tools", id: "absent" },
-          "any-version",
-        ),
+        await collection.deleteIfUnchanged(widgets.key(widget()), seen.version),
         false,
       );
     },

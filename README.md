@@ -135,14 +135,29 @@ and what you decode is what the last writer decided.
 
 ## Backends
 
-| Package                       | Status                                 |
-| ----------------------------- | -------------------------------------- |
-| `createMemoryStore`           | included; the reference implementation |
-| `@pegma/storage-azure-tables` | next                                   |
+| Package                       | Status                                     |
+| ----------------------------- | ------------------------------------------ |
+| `createMemoryStore`           | included; the reference implementation     |
+| `@pegma/storage-azure-tables` | available; passes the same conformance run |
 
 The in-memory store is not only for tests. It enforces the same concurrency
 rules as a real backend, so an assembled application runs correctly before
 anyone has configured a database.
+
+```ts
+import { TableClient } from "@azure/data-tables";
+import { createAzureTablesStore } from "@pegma/storage-azure-tables";
+
+const store = createAzureTablesStore({
+  client: new TableClient(endpoint, "pegma", credential),
+});
+```
+
+Every collection shares one table, separated by a partition-key prefix of
+`<collection>:<partition>`, so a deployment provisions one table rather than
+one per collection. Optimistic concurrency maps onto ETags, and the adapter is
+verified against Azurite by the same conformance cases the in-memory store
+runs.
 
 ## Development
 

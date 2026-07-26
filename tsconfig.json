@@ -3,6 +3,9 @@
   "references": [
     {
       "path": "./packages/storage-core"
+    },
+    {
+      "path": "./packages/storage-azure-tables"
     }
   ]
 }
