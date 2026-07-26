@@ -80,6 +80,50 @@ records or call another service still gets re-evaluated correctly. It may run
 more than once, so it must not assume otherwise; if it mints an identifier,
 read the stored one back from `result.value`.
 
+## Writing a conditional replacement
+
+`update` covers a decision you can make from the current record. When the
+version came from an earlier request and the caller hands it back, use
+`putIfUnchanged`, which lands only if nothing has happened since:
+
+```ts
+const ok = await collection.putIfUnchanged(revoked, callerSuppliedVersion);
+```
+
+## Changing several records together
+
+`transact` applies a list of actions to one partition, all of them or none.
+This is how an invariant that spans records survives concurrency — a uniqueness
+guard written with the record it guards, or a state change written with its
+outbox entry.
+
+```ts
+const outcome = await collection.transact(partition, [
+  { action: "insert", value: assignment },
+  { action: "insert", value: uniquenessGuard },
+  { action: "insert", value: auditRecord },
+]);
+
+if (!outcome.committed) {
+  // "exists", "missing", or "changed"
+  return conflictFor(outcome.reason);
+}
+```
+
+A refused precondition is an outcome, not an exception, so a conflict your
+domain expects reads as ordinary control flow. Genuine failures still throw.
+
+The scope is one collection and one partition on purpose. That is what backends
+actually offer — Azure entity-group transactions, a D1 batch, a Durable Object
+transaction, a SQL statement batch — and promising more would promise something
+no adapter could keep.
+
+Actions are `insert`, `put`, `putIfUnchanged`, and `delete`. There is
+deliberately **no version-conditional delete**: Azure carries no per-action
+condition on a delete inside a transaction, and the conformance suite caught it
+committing one that should have been refused. Express a conditional removal as
+a `putIfUnchanged` to a tombstone your codec understands.
+
 ## Sweeping expired records
 
 Listing a partition is not a snapshot, so a record can become live again
