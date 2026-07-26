@@ -163,6 +163,20 @@ export interface CollectionStore<T> {
   put(value: T): Promise<void>;
 
   /**
+   * Writes a record only if it still holds the version you read.
+   *
+   * The mirror of {@link deleteIfUnchanged}, for a caller holding a version
+   * from an earlier read that wants its write to land only if nothing has
+   * happened since. Returns false if the record changed or is gone.
+   *
+   * Prefer {@link update} when the decision can be made from the current
+   * record. Reach for this when the version was read in an earlier request
+   * and handed back by the caller, which `update` cannot express because its
+   * decider sees the record but never the version.
+   */
+  putIfUnchanged(value: T, version: string): Promise<boolean>;
+
+  /**
    * Reads, decides, and writes atomically, retrying on conflict.
    *
    * This is the only safe way to change a record that other writers can
@@ -296,6 +310,16 @@ export function createMemoryStore(): Store {
         async put(value) {
           const key = definition.key(value);
           write(key, value, (read(key)?.version ?? 0) + 1);
+        },
+
+        async putIfUnchanged(value, version) {
+          const key = definition.key(value);
+          const row = read(key);
+          if (row === undefined || String(row.version) !== version) {
+            return false;
+          }
+          write(key, value, row.version + 1);
+          return true;
         },
 
         async update(key, decide, options) {

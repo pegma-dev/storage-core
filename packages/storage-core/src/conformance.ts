@@ -386,6 +386,89 @@ export const conformanceCases: readonly ConformanceCase[] = [
   ),
 
   testCase(
+    "putIfUnchanged writes when the version still matches",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ count: 1 }));
+      const seen = await collection.getVersioned(widgets.key(widget()));
+      if (seen === null) {
+        throw new Error("expected the record to exist");
+      }
+
+      assert.equal(
+        await collection.putIfUnchanged(
+          { ...seen.value, count: 2 },
+          seen.version,
+        ),
+        true,
+      );
+      assert.equal((await collection.get(widgets.key(widget())))?.count, 2);
+    },
+  ),
+
+  testCase("putIfUnchanged refuses a record that moved on", async (store) => {
+    const collection = store.collection(widgets);
+    await collection.put(widget({ count: 1 }));
+    const seen = await collection.getVersioned(widgets.key(widget()));
+    if (seen === null) {
+      throw new Error("expected the record to exist");
+    }
+
+    // Someone else writes between the read and the conditional write.
+    await collection.put(widget({ count: 50 }));
+
+    assert.equal(
+      await collection.putIfUnchanged(
+        { ...seen.value, count: 2 },
+        seen.version,
+      ),
+      false,
+    );
+    assert.equal((await collection.get(widgets.key(widget())))?.count, 50);
+  }),
+
+  testCase("putIfUnchanged refuses a record already gone", async (store) => {
+    const collection = store.collection(widgets);
+    await collection.put(widget());
+    const seen = await collection.getVersioned(widgets.key(widget()));
+    if (seen === null) {
+      throw new Error("expected the record to exist");
+    }
+    await collection.delete(widgets.key(widget()));
+
+    assert.equal(
+      await collection.putIfUnchanged(seen.value, seen.version),
+      false,
+    );
+    assert.equal(await collection.get(widgets.key(widget())), null);
+  }),
+
+  testCase("putIfUnchanged moves the version on", async (store) => {
+    const collection = store.collection(widgets);
+    await collection.put(widget({ count: 1 }));
+    const first = await collection.getVersioned(widgets.key(widget()));
+    if (first === null) {
+      throw new Error("expected the record to exist");
+    }
+
+    assert.equal(
+      await collection.putIfUnchanged(
+        { ...first.value, count: 2 },
+        first.version,
+      ),
+      true,
+    );
+    // The token that authorized the first write must not authorize a second.
+    assert.equal(
+      await collection.putIfUnchanged(
+        { ...first.value, count: 3 },
+        first.version,
+      ),
+      false,
+    );
+  }),
+
+  testCase(
     "deleteIfUnchanged reports false for a record already gone",
     async (store) => {
       const collection = store.collection(widgets);

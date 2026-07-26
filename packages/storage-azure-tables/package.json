@@ -1,6 +1,6 @@
 {
   "name": "@pegma/storage-azure-tables",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Azure Table Storage adapter for @pegma/storage-core.",
   "license": "MIT",
   "type": "module",
@@ -30,7 +30,7 @@
   },
   "dependencies": {
     "@azure/data-tables": "^13.3.1",
-    "@pegma/storage-core": "0.1.2"
+    "@pegma/storage-core": "0.2.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

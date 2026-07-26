@@ -256,6 +256,24 @@ export function createAzureTablesStore(
           await client.upsertEntity(entityFor(key, value), "Replace");
         },
 
+        async putIfUnchanged(value, version) {
+          await ensureTable();
+          const key = definition.key(value);
+          try {
+            await client.updateEntity(entityFor(key, value), "Replace", {
+              etag: version,
+            });
+            return true;
+          } catch (error) {
+            const status = statusCode(error);
+            // 404: gone. 412: changed since it was read.
+            if (status === 404 || status === 412) {
+              return false;
+            }
+            throw error;
+          }
+        },
+
         async update(key, decide, updateOptions) {
           const maxAttempts = updateOptions?.maxAttempts ?? 3;
 
