@@ -1,6 +1,6 @@
 {
   "name": "@pegma/storage-core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Schema-agnostic persistence: declared collections, keyed access, and optimistic concurrency.",
   "license": "MIT",
   "type": "module",
