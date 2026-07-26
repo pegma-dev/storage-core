@@ -1,0 +1,160 @@
+# Storage Core
+
+[![CI](https://github.com/pegma-dev/storage-core/actions/workflows/ci.yml/badge.svg)](https://github.com/pegma-dev/storage-core/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Persistence for [Pegma](https://pegma.dev) components, without the component
+having to know what the database is.
+
+> [!IMPORTANT]
+> Storage Core is in early `0.x` development. Its public API is not stable,
+> its packages are not published, and it is not ready for production use.
+
+## Why it exists
+
+A component that keeps records should not also have to write retry loops,
+conflict handling, and sweep logic. That code is the same everywhere, it is
+subtle, and getting it slightly wrong produces data loss that only shows up
+under load.
+
+Storage Core owns that plumbing. Components declare what they keep; storage
+handles how it is kept.
+
+It is schema-agnostic on purpose. It never inspects a decoded record, so a
+support desk's tickets and an authorization component's role assignments use
+the same primitives without storage knowing anything about either.
+
+## Declaring what you keep
+
+```ts
+import { defineCollection, createMemoryStore } from "@pegma/storage-core";
+
+interface Session {
+  readonly id: string;
+  readonly principalId: string;
+  readonly expiresAt: string;
+}
+
+const sessions = defineCollection<Session>({
+  name: "sessions",
+  key: (session) => ({ partition: "session", id: session.id }),
+  codec: {
+    encode: (session) => ({ ...session }),
+    decode: (record) => ({
+      id: String(record["id"]),
+      principalId: String(record["principalId"]),
+      expiresAt: String(record["expiresAt"]),
+    }),
+  },
+});
+
+const store = createMemoryStore();
+const collection = store.collection(sessions);
+```
+
+The codec is where your types meet flat storage. Storage only ever sees
+strings, numbers, booleans, and nulls; dates, enums, and nested shapes are
+yours to encode.
+
+## Changing a record safely
+
+`update` reads, asks you what to write, and writes — retrying with freshly
+read state whenever someone else got there first.
+
+```ts
+const result = await collection.update(key, (current) => {
+  if (current === null) return { action: "keep" };
+  if (current.version >= incoming.version) return { action: "keep" };
+  return { action: "write", value: applyEvent(current, incoming) };
+});
+```
+
+The important part is that **your decision runs again on every conflict**. A
+staleness check, a field that must keep its first value, a cap on how many
+records may be active — put it inside the decider and it is re-evaluated
+against whatever the winning writer just stored. A check performed before the
+call is a check performed against state that may no longer be true.
+
+The decider may be asynchronous, so a decision that has to count sibling
+records or call another service still gets re-evaluated correctly. It may run
+more than once, so it must not assume otherwise; if it mints an identifier,
+read the stored one back from `result.value`.
+
+## Sweeping expired records
+
+Listing a partition is not a snapshot, so a record can become live again
+between being enumerated and being deleted. `deleteIfUnchanged` is what makes
+a sweep safe:
+
+```ts
+for (const row of await collection.listVersioned("session")) {
+  if (isExpired(row.value, now)) {
+    await collection.deleteIfUnchanged(sessions.key(row.value), row.version);
+  }
+}
+```
+
+A false return means the record changed or is already gone. Both mean leave
+it alone, not something went wrong.
+
+## Conformance is the specification
+
+`@pegma/storage-core/conformance` exports the behaviour every backend must
+exhibit, as plain test cases with no test-framework dependency:
+
+```ts
+import { conformanceCases } from "@pegma/storage-core/conformance";
+
+for (const testCase of conformanceCases) {
+  it(testCase.name, () => testCase.run(() => createMyStore()));
+}
+```
+
+An adapter is finished when it passes them. A behaviour not asserted there is
+not something a component may rely on.
+
+## Records are written whole
+
+There is no partial-merge write. `put` and `update` always store the complete
+record produced by your codec.
+
+This is a deliberate narrowing. Merge-style patches make clearing a field
+unreliable on some backends, and they make a stored record the accumulated
+result of writes nobody can see. Writing whole records means a null clears,
+and what you decode is what the last writer decided.
+
+## Not here
+
+- **Transactions across records.** Multi-record changes are ordinary sequences
+  of calls, and the ordering is the caller's correctness argument.
+- **Server-side queries.** Reads are by key or by partition. Filtering,
+  sorting, and limiting happen in your code, which keeps the port honest about
+  what a key-value backend can actually do.
+- **Secondary indexes.** Look-ups by a non-key field are a partition scan, or
+  an index collection you maintain yourself.
+
+## Backends
+
+| Package                       | Status                                 |
+| ----------------------------- | -------------------------------------- |
+| `createMemoryStore`           | included; the reference implementation |
+| `@pegma/storage-azure-tables` | next                                   |
+
+The in-memory store is not only for tests. It enforces the same concurrency
+rules as a real backend, so an assembled application runs correctly before
+anyone has configured a database.
+
+## Development
+
+Storage Core requires Node.js 22 or newer.
+
+```sh
+npm ci
+npm run check
+npm test
+npm run format:check
+```
+
+## License
+
+[MIT](LICENSE) © 2026 RetireGolden, LLC
