@@ -3,24 +3,22 @@
 # Runs when a GitHub release is published, so the tag, the release notes, and
 # the published version are one action rather than three.
 #
-# AUTHENTICATION, IN TWO PHASES
+# AUTHENTICATION
 #
-# npm cannot configure trusted publishing (OIDC) for a package that does not
-# exist yet: the setting lives on the package's own settings page. See
-# https://github.com/npm/cli/issues/8544.
+# This package is configured on npmjs.com to accept publishes only from a
+# trusted publisher: this repository, this workflow file. Authentication is a
+# short-lived OIDC token minted per run, so there is no long-lived credential
+# to leak, rotate, or forget to delete. `--provenance` additionally attaches a
+# signed attestation tying the tarball to the commit that built it.
 #
-#   Phase 1, once per package. Add a granular npm access token scoped to the
-#   @pegma org with write access, as the NPM_TOKEN repository secret, and
-#   publish. This creates the package.
+# There is deliberately no token fallback. If OIDC fails, the publish should
+# fail loudly rather than quietly reaching for a secret.
 #
-#   Phase 2, immediately after. On npmjs.com open the package settings, add a
-#   trusted publisher for this repository and this workflow file, then DELETE
-#   the NPM_TOKEN secret. Publishes then authenticate with a short-lived OIDC
-#   token and there is no long-lived credential left to leak.
-#
-# The workflow itself needs no change between phases: npm uses OIDC when a
-# trusted publisher is configured and falls back to NODE_AUTH_TOKEN when one
-# is not.
+# Bootstrapping a NEW package is the one case this cannot cover: npm will not
+# let you configure a trusted publisher for a package that does not exist yet
+# (https://github.com/npm/cli/issues/8544). Publish version 0.1.0 once from a
+# workstation with `npm publish -w <package>`, add the trusted publisher on
+# npmjs.com, and every release after that runs here.
 
 name: Publish
 
@@ -73,5 +71,3 @@ jobs:
 
       - name: Publish
         run: npm publish --workspaces --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
