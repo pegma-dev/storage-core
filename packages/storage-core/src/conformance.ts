@@ -468,6 +468,126 @@ export const conformanceCases: readonly ConformanceCase[] = [
     );
   }),
 
+  testCase("transact applies every action", async (store) => {
+    const collection = store.collection(widgets);
+    await collection.put(widget({ id: "doomed" }));
+
+    const outcome = await collection.transact("tools", [
+      { action: "insert", value: widget({ id: "hammer", count: 1 }) },
+      { action: "put", value: widget({ id: "wrench", count: 2 }) },
+      { action: "delete", key: { partition: "tools", id: "doomed" } },
+    ]);
+
+    assert.equal(outcome.committed, true);
+    const found = await collection.list("tools");
+    assert.deepEqual(found.map((item) => item.id).sort(), ["hammer", "wrench"]);
+  }),
+
+  testCase("a refused action leaves the partition untouched", async (store) => {
+    const collection = store.collection(widgets);
+    await collection.put(widget({ id: "hammer", count: 1 }));
+
+    const outcome = await collection.transact("tools", [
+      { action: "put", value: widget({ id: "wrench", count: 9 }) },
+      // Taken already, so the whole transaction must be refused.
+      { action: "insert", value: widget({ id: "hammer", count: 99 }) },
+    ]);
+
+    assert.equal(outcome.committed, false);
+    if (outcome.committed) {
+      throw new Error("unreachable");
+    }
+    assert.equal(outcome.reason, "exists");
+    // failedAction is best effort; not every backend reports it.
+
+    // Neither action applied.
+    assert.equal(
+      await collection.get({ partition: "tools", id: "wrench" }),
+      null,
+    );
+    assert.equal(
+      (await collection.get({ partition: "tools", id: "hammer" }))?.count,
+      1,
+    );
+  }),
+
+  testCase(
+    "transact refuses a conditional write whose record moved on",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ id: "hammer", count: 1 }));
+      const seen = await collection.getVersioned({
+        partition: "tools",
+        id: "hammer",
+      });
+      if (seen === null) {
+        throw new Error("expected the record to exist");
+      }
+      await collection.put(widget({ id: "hammer", count: 2 }));
+
+      const outcome = await collection.transact("tools", [
+        { action: "put", value: widget({ id: "wrench", count: 5 }) },
+        {
+          action: "putIfUnchanged",
+          value: widget({ id: "hammer", count: 3 }),
+          version: seen.version,
+        },
+      ]);
+
+      assert.equal(outcome.committed, false);
+      if (outcome.committed) {
+        throw new Error("unreachable");
+      }
+      assert.equal(outcome.reason, "changed");
+
+      // Neither the conditional write nor its sibling applied.
+      assert.equal(
+        (await collection.get({ partition: "tools", id: "hammer" }))?.count,
+        2,
+      );
+      assert.equal(
+        await collection.get({ partition: "tools", id: "wrench" }),
+        null,
+      );
+    },
+  ),
+  testCase("transact refuses a delete of a missing record", async (store) => {
+    const collection = store.collection(widgets);
+    const outcome = await collection.transact("tools", [
+      { action: "delete", key: { partition: "tools", id: "absent" } },
+    ]);
+
+    assert.equal(outcome.committed, false);
+    if (outcome.committed) {
+      throw new Error("unreachable");
+    }
+    assert.equal(outcome.reason, "missing");
+  }),
+
+  testCase(
+    "transact rejects an action outside its partition",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await assert.rejects(
+        collection.transact("tools", [
+          { action: "put", value: widget({ group: "toys", id: "ball" }) },
+        ]),
+        /may only touch partition/,
+      );
+    },
+  ),
+
+  testCase("transact rejects touching one key twice", async (store) => {
+    const collection = store.collection(widgets);
+    await assert.rejects(
+      collection.transact("tools", [
+        { action: "put", value: widget({ id: "hammer", count: 1 }) },
+        { action: "put", value: widget({ id: "hammer", count: 2 }) },
+      ]),
+      /more than once/,
+    );
+  }),
+
   testCase(
     "deleteIfUnchanged reports false for a record already gone",
     async (store) => {

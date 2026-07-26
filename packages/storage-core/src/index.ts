@@ -207,7 +207,69 @@ export interface CollectionStore<T> {
    * it alone" rather than "something went wrong".
    */
   deleteIfUnchanged(key: EntityKey, version: string): Promise<boolean>;
+
+  /**
+   * Applies several writes to one partition, all of them or none.
+   *
+   * Every action must target `partition`, and no key may appear twice. Both
+   * are rejected with a {@link StorageError} rather than being attempted,
+   * because a backend would refuse them with a far less useful message.
+   *
+   * A refused precondition is an outcome, not an error: the result names the
+   * action that was refused and why, so a caller can turn it into whatever
+   * its own domain calls that conflict. Genuine failures still throw.
+   *
+   * The single-partition limit is not an implementation detail leaking out.
+   * It is the guarantee every backend worth targeting actually offers, from
+   * Azure entity-group transactions to a SQL statement batch, and promising
+   * more than that would be promising something no adapter could keep.
+   *
+   * There is deliberately no version-conditional delete here. Azure carries no
+   * per-action condition on a delete inside a transaction, and the conformance
+   * suite caught it committing one that should have been refused. Rather than
+   * offer a guarantee one adapter cannot keep, a conditional removal is
+   * expressed as a `putIfUnchanged` to a tombstone your codec understands.
+   */
+  transact(
+    partition: string,
+    actions: readonly TransactionAction<T>[],
+  ): Promise<TransactionOutcome>;
 }
+
+/** One step of a transaction. */
+export type TransactionAction<T> =
+  | { readonly action: "insert"; readonly value: T }
+  | { readonly action: "put"; readonly value: T }
+  | {
+      readonly action: "putIfUnchanged";
+      readonly value: T;
+      readonly version: string;
+    }
+  | { readonly action: "delete"; readonly key: EntityKey };
+
+/**
+ * Why a transaction did not commit.
+ *
+ * `exists` an insert found the key taken. `missing` a delete or conditional
+ * write found nothing. `changed` a conditional write or delete found a
+ * different version than the one it named.
+ */
+export type TransactionRejection = "exists" | "missing" | "changed";
+
+export type TransactionOutcome =
+  | { readonly committed: true }
+  | {
+      readonly committed: false;
+      readonly reason: TransactionRejection;
+      /**
+       * Index of the refused action, when the backend says which one.
+       *
+       * Best effort on purpose: Azure does not always report it, so a caller
+       * that must know which precondition failed should re-read rather than
+       * rely on this being present.
+       */
+      readonly failedAction?: number;
+    };
 
 /**
  * A backend.
@@ -227,6 +289,37 @@ interface StoredRow {
 
 /** Partitions hold rows by id; a collection holds partitions by name. */
 type Partitions = Map<string, Map<string, StoredRow>>;
+
+/**
+ * Rejects a transaction that reaches outside its partition or touches one key
+ * twice. Both are caller mistakes, and a backend would report them as an
+ * opaque service error well after the useful context is gone.
+ */
+export function assertOnePartition(
+  collection: string,
+  partition: string,
+  keys: readonly EntityKey[],
+): void {
+  if (keys.length === 0) {
+    throw new StorageError(
+      `A transaction on ${collection} was given no actions.`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const key of keys) {
+    if (key.partition !== partition) {
+      throw new StorageError(
+        `A transaction on ${collection} may only touch partition ${JSON.stringify(partition)}, but an action targets ${JSON.stringify(key.partition)}.`,
+      );
+    }
+    if (seen.has(key.id)) {
+      throw new StorageError(
+        `A transaction on ${collection} touches ${JSON.stringify(key.id)} more than once.`,
+      );
+    }
+    seen.add(key.id);
+  }
+}
 
 function upsertMap<K, V>(map: Map<K, V>, key: K, create: () => V): V {
   const existing = map.get(key);
@@ -377,6 +470,59 @@ export function createMemoryStore(): Store {
             partitions.get(key.partition)?.delete(key.id) ?? false;
           dropIfEmpty(key.partition);
           return deleted;
+        },
+
+        async transact(partition, actions) {
+          const keys = actions.map((step) =>
+            step.action === "delete" ? step.key : definition.key(step.value),
+          );
+          assertOnePartition(definition.name, partition, keys);
+
+          // Every precondition is checked before anything is applied. Nothing
+          // between here and the last write awaits, so no other writer can
+          // interleave.
+          for (const [index, step] of actions.entries()) {
+            const key = keys[index] as EntityKey;
+            const row = read(key);
+            const conditional = step.action === "putIfUnchanged";
+
+            if (step.action === "insert" && row !== undefined) {
+              return {
+                committed: false,
+                failedAction: index,
+                reason: "exists",
+              };
+            }
+            if (
+              (conditional || step.action === "delete") &&
+              row === undefined
+            ) {
+              return {
+                committed: false,
+                failedAction: index,
+                reason: "missing",
+              };
+            }
+            if (conditional && String(row?.version) !== step.version) {
+              return {
+                committed: false,
+                failedAction: index,
+                reason: "changed",
+              };
+            }
+          }
+
+          for (const [index, step] of actions.entries()) {
+            const key = keys[index] as EntityKey;
+            if (step.action === "delete") {
+              partitions.get(key.partition)?.delete(key.id);
+              dropIfEmpty(key.partition);
+            } else {
+              write(key, step.value, (read(key)?.version ?? 0) + 1);
+            }
+          }
+
+          return { committed: true };
         },
       };
     },

@@ -2,10 +2,13 @@ import type {
   TableClient,
   TableEntity,
   TableEntityResult,
+  TransactionAction as SdkTransactionAction,
 } from "@azure/data-tables";
 import {
+  assertOnePartition,
   ConcurrencyError,
   StorageError,
+  type TransactionRejection,
   type CollectionDefinition,
   type CollectionStore,
   type EntityKey,
@@ -50,6 +53,45 @@ function statusCode(error: unknown): number | undefined {
 
 function isStatus(error: unknown, code: number): boolean {
   return statusCode(error) === code;
+}
+
+/** Azure refuses an entity-group transaction larger than this. */
+const MAX_TRANSACTION_ACTIONS = 100;
+
+/**
+ * Maps a refused transaction onto the port's vocabulary.
+ *
+ * Returns null when the status is not a precondition failure, so the caller
+ * can rethrow rather than report a conflict that did not happen.
+ */
+function rejectionFor(status: number | undefined): TransactionRejection | null {
+  switch (status) {
+    case 409:
+      return "exists";
+    case 404:
+      return "missing";
+    case 412:
+      return "changed";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Which action the service refused.
+ *
+ * The SDK reports this on the error when it can, and null when it cannot.
+ * Guessing would be worse than saying nothing.
+ */
+function failedActionIndex(error: unknown, total: number): number | null {
+  const reported =
+    typeof error === "object" && error !== null
+      ? (error as { failedTransactionActionIndex?: number })
+          .failedTransactionActionIndex
+      : undefined;
+  return typeof reported === "number" && reported >= 0 && reported < total
+    ? reported
+    : null;
 }
 
 /** OData string literals escape a single quote by doubling it. */
@@ -365,6 +407,60 @@ export function createAzureTablesStore(
               return false;
             }
             throw error;
+          }
+        },
+
+        async transact(partition, actions) {
+          const keys = actions.map((step) =>
+            step.action === "delete" ? step.key : definition.key(step.value),
+          );
+          assertOnePartition(name, partition, keys);
+
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `Azure Table Storage accepts at most ${MAX_TRANSACTION_ACTIONS} actions in one transaction, and this one has ${actions.length}.`,
+            );
+          }
+
+          await ensureTable();
+
+          const batch = actions.map((step, index): SdkTransactionAction => {
+            const key = keys[index] as EntityKey;
+            const identity = {
+              partitionKey: partitionKey(key.partition),
+              rowKey: rowKey(key.id),
+            };
+            switch (step.action) {
+              case "insert":
+                return ["create", entityFor(key, step.value)];
+              case "put":
+                return ["upsert", entityFor(key, step.value), "Replace"];
+              case "putIfUnchanged":
+                return [
+                  "update",
+                  entityFor(key, step.value),
+                  "Replace",
+                  { etag: step.version },
+                ];
+              case "delete":
+                return ["delete", identity];
+            }
+          });
+
+          try {
+            await client.submitTransaction(batch);
+            return { committed: true };
+          } catch (error) {
+            const reason = rejectionFor(statusCode(error));
+            if (reason === null) {
+              throw error;
+            }
+            const failedAction = failedActionIndex(error, actions.length);
+            return {
+              committed: false,
+              reason,
+              ...(failedAction === null ? {} : { failedAction }),
+            };
           }
         },
       };
