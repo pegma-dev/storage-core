@@ -73,20 +73,27 @@ jobs:
       # registry. A repository holding several packages routinely releases with
       # only some of them changed, and `npm publish --workspaces` fails the
       # whole run on the first unchanged one.
+      # Two passes so a package is never published before something it depends
+      # on. Pass 1 takes the packages with no dependency inside this scope,
+      # pass 2 takes the rest.
       - name: Publish
         run: |
           set -euo pipefail
-          for manifest in packages/*/package.json; do
-            name=$(node -p "require('./$manifest').name")
-            version=$(node -p "require('./$manifest').version")
-            if [ "$(node -p "require('./$manifest').private === true")" = "true" ]; then
-              echo "skipping $name (private)"
-              continue
-            fi
-            if npm view "$name@$version" version >/dev/null 2>&1; then
-              echo "skipping $name@$version (already on the registry)"
-              continue
-            fi
-            echo "publishing $name@$version"
-            npm publish -w "$name" --provenance
+          for pass in 1 2; do
+            for manifest in packages/*/package.json; do
+              name=$(node -p "require('./$manifest').name")
+              version=$(node -p "require('./$manifest').version")
+              if [ "$(node -p "require('./$manifest').private === true")" = "true" ]; then
+                continue
+              fi
+              dependent=$(node -p "Object.keys(require('./$manifest').dependencies||{}).some(d=>d.startsWith('@pegma/'))")
+              if [ "$pass" = "1" ] && [ "$dependent" = "true" ]; then continue; fi
+              if [ "$pass" = "2" ] && [ "$dependent" = "false" ]; then continue; fi
+              if npm view "$name@$version" version >/dev/null 2>&1; then
+                echo "skipping $name@$version (already on the registry)"
+                continue
+              fi
+              echo "publishing $name@$version"
+              npm publish -w "$name" --provenance
+            done
           done
