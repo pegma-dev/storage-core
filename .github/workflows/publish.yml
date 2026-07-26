@@ -1,0 +1,77 @@
+# Publishes every public workspace package to npm.
+#
+# Runs when a GitHub release is published, so the tag, the release notes, and
+# the published version are one action rather than three.
+#
+# AUTHENTICATION, IN TWO PHASES
+#
+# npm cannot configure trusted publishing (OIDC) for a package that does not
+# exist yet: the setting lives on the package's own settings page. See
+# https://github.com/npm/cli/issues/8544.
+#
+#   Phase 1, once per package. Add a granular npm access token scoped to the
+#   @pegma org with write access, as the NPM_TOKEN repository secret, and
+#   publish. This creates the package.
+#
+#   Phase 2, immediately after. On npmjs.com open the package settings, add a
+#   trusted publisher for this repository and this workflow file, then DELETE
+#   the NPM_TOKEN secret. Publishes then authenticate with a short-lived OIDC
+#   token and there is no long-lived credential left to leak.
+#
+# The workflow itself needs no change between phases: npm uses OIDC when a
+# trusted publisher is configured and falls back to NODE_AUTH_TOKEN when one
+# is not.
+
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC: trusted publishing and provenance attestation
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or newer, which is ahead of what
+      # some Node images bundle.
+      - name: Use a current npm
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Publishing runs the same gate as CI. A release should never ship
+      # something that would have failed a pull request.
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Check types
+        run: npm run check
+
+      - name: Run tests
+        run: npm test
+
+      - name: Publish
+        run: npm publish --workspaces --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
