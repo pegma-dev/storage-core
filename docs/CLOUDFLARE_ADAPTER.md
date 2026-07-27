@@ -15,9 +15,14 @@ that claim, tested. It is not an invitation to a third adapter.
 
 ## The backend decision
 
-- **D1 — chosen.** Serverless SQLite: transactional SQL, strong consistency,
-  conditional writes. It can honor the full port — including
-  single-collection, single-partition `transact` — without pretending.
+- **D1 — chosen.** Serverless SQLite: transactional SQL and conditional
+  writes, able to honor the full port — including single-collection,
+  single-partition `transact` — without pretending. One qualifier the
+  adapter must respect: D1's consistency story is primary-first, and global
+  read replication can serve stale reads unless the session mechanism
+  (read-your-writes) is used. Version tokens are meaningless over stale
+  reads, so the adapter pins its operations to the primary / a session —
+  and must not enable or document replicated reads as compatible.
 - **Workers KV — rejected, permanently.** Eventually consistent, no
   compare-and-swap. It cannot pass the conformance suite and must not be
   bent to appear to. Do not revisit this without new facts about KV itself.
@@ -46,11 +51,15 @@ that claim, tested. It is not an invitation to a third adapter.
 ## The test bar (non-negotiable)
 
 The conformance suite is the specification. This adapter is finished when
-every case passes against **real D1** — `wrangler`/Miniflare's D1 in a
-vitest globalSetup, the same pattern `test/azurite.ts` uses to spawn real
-Azurite. No mocked D1 client, ever; the Azure adapter's history (a `put`
-that could not create, a silently ignored conditional delete) is the proof
-of why. CI runs both adapters' suites on Node 22 + 24.
+every case passes against **real D1**. Mechanically that is NOT the
+`test/azurite.ts` pattern: a D1 binding is an in-process object, not a TCP
+service, so a vitest `globalSetup` cannot spawn it and hand it to test
+workers. Use the Cloudflare Workers vitest pool (or instantiate Miniflare
+inside the suite itself) so the conformance cases hold a live binding. What
+carries over from Azurite is the rule, not the mechanism: the real backend,
+never a fake — the Azure adapter's history (a `put` that could not create,
+a silently ignored conditional delete) is the proof of why. CI runs both
+adapters' suites on Node 22 + 24.
 
 ## Versioning and publish
 
