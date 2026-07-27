@@ -1,0 +1,39 @@
+{
+  "name": "@pegma/storage-cloudflare-d1",
+  "version": "0.1.0",
+  "description": "Cloudflare D1 adapter for @pegma/storage-core.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/**/*.d.ts",
+    "dist/**/*.d.ts.map",
+    "dist/**/*.js",
+    "dist/**/*.js.map"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pegma-dev/storage-core.git",
+    "directory": "packages/storage-cloudflare-d1"
+  },
+  "dependencies": {
+    "@pegma/storage-core": "0.3.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
+  }
+}

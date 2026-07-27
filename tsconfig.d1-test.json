@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "types": ["@cloudflare/vitest-pool-workers", "@cloudflare/workers-types"]
+  },
+  "include": ["packages/storage-cloudflare-d1/src/**/*.test.ts"]
+}

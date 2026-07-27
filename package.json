@@ -13,13 +13,17 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "check": "tsc -b --pretty false && tsc -p tsconfig.test.json --pretty false",
+    "check": "tsc -b --pretty false && tsc -p tsconfig.test.json --pretty false && tsc -p tsconfig.d1-test.json --pretty false && tsc -p tsconfig.d1-consumer.json --pretty false",
     "clean": "tsc -b --clean",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "npm run build && vitest run"
+    "test": "npm run build && npm run test:node && npm run test:d1",
+    "test:node": "vitest run --config vitest.config.ts",
+    "test:d1": "vitest run --config vitest.d1.config.ts"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.18.8",
+    "@cloudflare/workers-types": "^5.20260727.1",
     "@types/node": "^26.1.1",
     "azurite": "^3.36.0",
     "prettier": "^3.9.6",

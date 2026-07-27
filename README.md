@@ -179,10 +179,11 @@ and what you decode is what the last writer decided.
 
 ## Backends
 
-| Package                       | Status                                     |
-| ----------------------------- | ------------------------------------------ |
-| `createMemoryStore`           | included; the reference implementation     |
-| `@pegma/storage-azure-tables` | available; passes the same conformance run |
+| Package                        | Status                                     |
+| ------------------------------ | ------------------------------------------ |
+| `createMemoryStore`            | included; the reference implementation     |
+| `@pegma/storage-azure-tables`  | available; passes the same conformance run |
+| `@pegma/storage-cloudflare-d1` | implemented; first publish is still manual |
 
 The in-memory store is not only for tests. It enforces the same concurrency
 rules as a real backend, so an assembled application runs correctly before
@@ -202,6 +203,20 @@ Every collection shares one table, separated by a partition-key prefix of
 one per collection. Optimistic concurrency maps onto ETags, and the adapter is
 verified against Azurite by the same conformance cases the in-memory store
 runs.
+
+On Cloudflare Workers, pass the D1 binding directly:
+
+```ts
+import { createCloudflareD1Store } from "@pegma/storage-cloudflare-d1";
+
+const store = createCloudflareD1Store({ database: env.DB });
+```
+
+The D1 adapter also keeps every collection in one data table with the same
+`<collection>:<partition>` layout. It runs the conformance suite against a real
+D1 binding in Cloudflare's Workers Vitest pool. It deliberately uses direct
+binding calls, which stay on the primary database; D1 sessions and replicated
+reads are incompatible with its optimistic version checks.
 
 ## Development
 
