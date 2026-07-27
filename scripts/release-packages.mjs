@@ -67,7 +67,7 @@ function run(command, arguments_, options = {}) {
     cwd: options.cwd,
     encoding: "utf8",
     env: options.env ?? process.env,
-    shell: false,
+    shell: options.shell ?? false,
     stdio: options.capture ? "pipe" : "inherit",
   });
   if (result.error) {
