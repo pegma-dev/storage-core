@@ -30,6 +30,14 @@ workspace is packed too and must reproduce the exact integrity already on npm;
 this prevents an unversioned package change from hiding in another package's
 release.
 
+Release version numbers are nevertheless allocated repository-wide because
+Git tags share one namespace. Before changing a package version, choose a
+stable `X.Y.Z` that has never appeared as a `vX.Y.Z` tag in this repository;
+normally use the next version after the highest existing release tag. A
+package may therefore skip numeric versions. Packages intentionally released
+together may share the same version and tag, but a later package must never
+reuse an earlier release's number or move its tag.
+
 The reviewed release order is:
 
 1. `@pegma/storage-core`
