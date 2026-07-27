@@ -38,3 +38,11 @@ export function decidePublication(
   localIntegrity: string,
   registryIntegrity: string | null,
 ): "publish" | "skip";
+
+export function prepareRelease(
+  options?: ReleaseCommandOptions,
+): Promise<{ manifestPath: string; manifest: unknown }>;
+
+export function publishPreparedRelease(
+  options?: ReleaseCommandOptions,
+): Promise<void>;
