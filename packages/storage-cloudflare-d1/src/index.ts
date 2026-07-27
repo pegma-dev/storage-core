@@ -20,6 +20,11 @@ const MARKERS = {
   changed: "PEGMA_STORAGE_D1_TX_CHANGED",
 } as const satisfies Record<TransactionRejection, string>;
 
+const schemaInitializations = new WeakMap<
+  CloudflareD1Database,
+  Promise<void>
+>();
+
 const CREATE_RECORDS = `
   CREATE TABLE IF NOT EXISTS ${RECORDS_TABLE} (
     partition_key TEXT NOT NULL,
@@ -289,28 +294,41 @@ export function createCloudflareD1Store(
   const { database } = options;
   const createSchemaIfMissing = options.createSchemaIfMissing ?? true;
 
-  let schemaReady: Promise<void> | undefined;
-
   function ensureSchema(): Promise<void> {
     if (!createSchemaIfMissing) {
       return Promise.resolve();
     }
-    schemaReady ??= database
-      .batch([
-        database.prepare(CREATE_RECORDS),
-        database.prepare(CREATE_GUARD),
-        database.prepare(CREATE_EXISTS_TRIGGER),
-        database.prepare(CREATE_MISSING_TRIGGER),
-        database.prepare(CREATE_CHANGED_TRIGGER),
-      ])
+
+    const existing = schemaInitializations.get(database);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    // Defer preparation into a microtask so `pending` is cached before any
+    // synchronous binding failure can be observed by the rejection handler.
+    const pending = Promise.resolve()
+      .then(() =>
+        database.batch([
+          database.prepare(CREATE_RECORDS),
+          database.prepare(CREATE_GUARD),
+          database.prepare(CREATE_EXISTS_TRIGGER),
+          database.prepare(CREATE_MISSING_TRIGGER),
+          database.prepare(CREATE_CHANGED_TRIGGER),
+        ]),
+      )
       .then(
         () => undefined,
         (error: unknown) => {
-          schemaReady = undefined;
+          // Delete only this attempt. A later attempt must not be evicted if
+          // an unusual thenable reports the old failure late.
+          if (schemaInitializations.get(database) === pending) {
+            schemaInitializations.delete(database);
+          }
           throw error;
         },
       );
-    return schemaReady;
+    schemaInitializations.set(database, pending);
+    return pending;
   }
 
   return {

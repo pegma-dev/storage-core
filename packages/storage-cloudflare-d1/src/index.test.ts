@@ -3,7 +3,12 @@ import { conformanceCases } from "@pegma/storage-core/conformance";
 import { defineCollection, type CollectionStore } from "@pegma/storage-core";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { createCloudflareD1Store, type CloudflareD1Database } from "./index.js";
+import {
+  createCloudflareD1Store,
+  type CloudflareD1Database,
+  type CloudflareD1PreparedStatement,
+  type CloudflareD1Result,
+} from "./index.js";
 
 declare global {
   namespace Cloudflare {
@@ -61,6 +66,22 @@ function widget(id: string, label = id): Widget {
   return { group: "tools", id, label };
 }
 
+function wrappedDatabase(
+  runBatch: <T>(
+    statements: CloudflareD1PreparedStatement[],
+  ) => Promise<CloudflareD1Result<T>[]>,
+): CloudflareD1Database {
+  return {
+    prepare(query) {
+      return env.DB.prepare(query);
+    },
+    batch: runBatch,
+    withSession() {
+      return undefined;
+    },
+  };
+}
+
 beforeAll(async () => {
   await collection().get({ partition: "tools", id: "initialize-schema" });
 });
@@ -78,6 +99,73 @@ describe("createCloudflareD1Store", () => {
       await testCase.run(freshStore);
     });
   }
+});
+
+describe("D1 schema initialization", () => {
+  it("is shared by stores over the same direct binding", async () => {
+    let schemaBatches = 0;
+    const database = wrappedDatabase(
+      <T>(statements: CloudflareD1PreparedStatement[]) => {
+        schemaBatches += 1;
+        return env.DB.batch<T>(statements as D1PreparedStatement[]);
+      },
+    );
+    const first = createCloudflareD1Store({ database });
+    const second = createCloudflareD1Store({ database });
+
+    await Promise.all([
+      first.collection(widgets).get({ partition: "tools", id: "first" }),
+      second.collection(widgets).get({ partition: "tools", id: "second" }),
+    ]);
+
+    expect(schemaBatches).toBe(1);
+  });
+
+  it("retries a rejected initialization for the same binding", async () => {
+    let schemaBatches = 0;
+    const database = wrappedDatabase(
+      <T>(statements: CloudflareD1PreparedStatement[]) => {
+        schemaBatches += 1;
+        if (schemaBatches === 1) {
+          return Promise.reject(new Error("transient schema failure"));
+        }
+        return env.DB.batch<T>(statements as D1PreparedStatement[]);
+      },
+    );
+
+    await expect(
+      createCloudflareD1Store({ database })
+        .collection(widgets)
+        .get({ partition: "tools", id: "first-attempt" }),
+    ).rejects.toThrow("transient schema failure");
+    await expect(
+      createCloudflareD1Store({ database })
+        .collection(widgets)
+        .get({ partition: "tools", id: "second-attempt" }),
+    ).resolves.toBeNull();
+
+    expect(schemaBatches).toBe(2);
+  });
+
+  it("does not initialize when schema creation is disabled", async () => {
+    let schemaBatches = 0;
+    const database = wrappedDatabase(
+      <T>(statements: CloudflareD1PreparedStatement[]) => {
+        schemaBatches += 1;
+        return env.DB.batch<T>(statements as D1PreparedStatement[]);
+      },
+    );
+
+    await expect(
+      createCloudflareD1Store({
+        database,
+        createSchemaIfMissing: false,
+      })
+        .collection(widgets)
+        .get({ partition: "tools", id: "provisioned" }),
+    ).resolves.toBeNull();
+    expect(schemaBatches).toBe(0);
+  });
 });
 
 describe("D1 version tombstones", () => {
