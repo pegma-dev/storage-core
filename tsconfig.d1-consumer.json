@@ -8,11 +8,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": [
-    "packages/storage-core/src/**/*.test.ts",
-    "packages/storage-azure-tables/src/**/*.test.ts",
-    "test/azurite.ts",
-    "vitest.config.ts",
-    "vitest.d1.config.ts"
-  ]
+  "include": ["test/d1-public-types.ts"]
 }

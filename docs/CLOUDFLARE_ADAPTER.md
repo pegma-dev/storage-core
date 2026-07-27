@@ -1,5 +1,12 @@
 # The Cloudflare adapter: `@pegma/storage-cloudflare-d1`
 
+## Status
+
+Implemented on `claude/cloudflare-d1-adapter`, including real-D1 conformance
+coverage in the Cloudflare Workers Vitest pool. This record does not represent
+the branch as merged or the package as published. The first npm publish remains
+a manual 2FA bootstrap step; trusted publishing can be configured after that.
+
 Decided 2026-07-27. This is the assignment record for Storage Core's second
 real adapter — read `AGENTS.md` first; its hard rules govern everything here.
 
