@@ -12,6 +12,14 @@ import {
 } from "../scripts/release-packages.mjs";
 
 const git = process.platform === "win32" ? "git.exe" : "git";
+const releaseVersion = (
+  JSON.parse(
+    readFileSync(
+      join(process.cwd(), "packages", "storage-core", "package.json"),
+      "utf8",
+    ),
+  ) as { version: string }
+).version;
 
 function run(command: string, arguments_: string[], cwd?: string): string {
   return execFileSync(command, arguments_, {
@@ -46,7 +54,7 @@ describe("release package metadata", () => {
     );
     await expect(
       validateRepository({
-        releaseTag: "v0.3.0",
+        releaseTag: `v${releaseVersion}`,
         releasePrerelease: true,
       }),
     ).rejects.toThrow("prereleases cannot publish packages");

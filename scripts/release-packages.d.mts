@@ -18,6 +18,24 @@ export interface ReleaseCommandOptions extends ValidationOptions {
   readonly output?: string;
 }
 
+export interface PublicPackageManifest {
+  readonly name: string;
+  readonly version: string;
+  readonly [key: string]: unknown;
+}
+
+export interface ValidatedPackage {
+  readonly definition: ReleasePackageDefinition;
+  readonly manifest: PublicPackageManifest;
+  readonly packageDirectory: string;
+}
+
+export interface ValidationResult {
+  readonly root: string;
+  readonly packages: readonly ValidatedPackage[];
+  readonly releaseTag: string | undefined;
+}
+
 export const RELEASE_PACKAGES: readonly ReleasePackageDefinition[];
 
 export function parseArguments(
@@ -26,7 +44,7 @@ export function parseArguments(
 
 export function validateRepository(
   options?: ValidationOptions,
-): Promise<unknown>;
+): Promise<ValidationResult>;
 
 export function validateReleaseTag(options?: {
   readonly root?: string;
