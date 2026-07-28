@@ -333,7 +333,7 @@ export interface Store {
 
 interface StoredRow {
   readonly record: StoredRecord;
-  readonly version: number;
+  readonly version: bigint;
 }
 
 /** Partitions hold rows by id; a collection holds partitions by name. */
@@ -454,6 +454,55 @@ function compareKeys(left: EntityKey, right: EntityKey): number {
   return 0;
 }
 
+interface MemoryScanCandidate {
+  readonly key: EntityKey;
+  readonly row: StoredRow;
+}
+
+/** Adds one candidate while keeping the largest key at index zero. */
+function pushMemoryScanCandidate(
+  heap: MemoryScanCandidate[],
+  candidate: MemoryScanCandidate,
+): void {
+  heap.push(candidate);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareKeys(heap[parent]!.key, heap[index]!.key) >= 0) {
+      break;
+    }
+    [heap[parent], heap[index]] = [heap[index]!, heap[parent]!];
+    index = parent;
+  }
+}
+
+/** Restores the max-heap after replacing its largest candidate. */
+function sinkMemoryScanCandidate(heap: MemoryScanCandidate[]): void {
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let largest = index;
+    if (
+      left < heap.length &&
+      compareKeys(heap[left]!.key, heap[largest]!.key) > 0
+    ) {
+      largest = left;
+    }
+    if (
+      right < heap.length &&
+      compareKeys(heap[right]!.key, heap[largest]!.key) > 0
+    ) {
+      largest = right;
+    }
+    if (largest === index) {
+      return;
+    }
+    [heap[index], heap[largest]] = [heap[largest]!, heap[index]!];
+    index = largest;
+  }
+}
+
 /**
  * Creates an in-process {@link Store} that keeps everything in memory.
  *
@@ -464,10 +513,7 @@ function compareKeys(left: EntityKey, right: EntityKey): number {
  */
 export function createMemoryStore(): Store {
   const collections = new Map<string, Partitions>();
-  const collectionVersions = new Map<
-    string,
-    Map<string, Map<string, number>>
-  >();
+  let versionGeneration = 0n;
 
   return {
     collection<T>(definition: CollectionDefinition<T>): CollectionStore<T> {
@@ -477,11 +523,6 @@ export function createMemoryStore(): Store {
         (): Partitions => new Map(),
       );
       const { codec } = definition;
-      const versions = upsertMap(
-        collectionVersions,
-        definition.name,
-        (): Map<string, Map<string, number>> => new Map(),
-      );
 
       function read(key: EntityKey): StoredRow | undefined {
         return partitions.get(key.partition)?.get(key.id);
@@ -496,18 +537,12 @@ export function createMemoryStore(): Store {
 
       function write(key: EntityKey, value: T): T {
         const record = codec.encode(value);
-        const partitionVersions = upsertMap(
-          versions,
-          key.partition,
-          (): Map<string, number> => new Map(),
-        );
-        const version = (partitionVersions.get(key.id) ?? 0) + 1;
-        partitionVersions.set(key.id, version);
+        versionGeneration += 1n;
         upsertMap(
           partitions,
           key.partition,
           (): Map<string, StoredRow> => new Map(),
-        ).set(key.id, { record, version });
+        ).set(key.id, { record, version: versionGeneration });
         // Decode what was stored rather than echoing the input, so callers see
         // the same value a later `get` would return.
         return codec.decode(record);
@@ -570,7 +605,7 @@ export function createMemoryStore(): Store {
             // Re-read rather than trusting `before`: awaiting the decider
             // gives another writer the chance to land in between.
             const now = read(key);
-            if ((now?.version ?? 0) !== (before?.version ?? 0)) {
+            if ((now?.version ?? 0n) !== (before?.version ?? 0n)) {
               continue;
             }
 
@@ -599,24 +634,26 @@ export function createMemoryStore(): Store {
             options.cursor === undefined
               ? null
               : decodeMemoryScanCursor(definition.name, options.cursor);
-          const found: Array<{
-            readonly key: EntityKey;
-            readonly row: StoredRow;
-          }> = [];
+          const found: MemoryScanCandidate[] = [];
           let hasMore = false;
           for (const [partition, rows] of partitions) {
             for (const [id, row] of rows) {
               const key = { partition, id };
               if (after === null || compareKeys(key, after) > 0) {
-                found.push({ key, row });
-                found.sort((left, right) => compareKeys(left.key, right.key));
-                if (found.length > options.limit) {
-                  found.pop();
+                const candidate = { key, row };
+                if (found.length < options.limit) {
+                  pushMemoryScanCandidate(found, candidate);
+                } else {
                   hasMore = true;
+                  if (compareKeys(key, found[0]!.key) < 0) {
+                    found[0] = candidate;
+                    sinkMemoryScanCandidate(found);
+                  }
                 }
               }
             }
           }
+          found.sort((left, right) => compareKeys(left.key, right.key));
           return {
             records: found.map(({ key, row }) => ({
               key,
