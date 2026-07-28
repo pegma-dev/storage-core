@@ -44,6 +44,30 @@ describe("release package metadata", () => {
     ]);
   });
 
+  it("releases the breaking scan contract and both adapters together", () => {
+    const manifests = RELEASE_PACKAGES.map(({ directory }) =>
+      JSON.parse(
+        readFileSync(
+          join(process.cwd(), "packages", directory, "package.json"),
+          "utf8",
+        ),
+      ),
+    ) as Array<{
+      name: string;
+      version: string;
+      dependencies?: Record<string, string>;
+    }>;
+
+    expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
+      { name: "@pegma/storage-core", version: "0.4.0" },
+      { name: "@pegma/storage-azure-tables", version: "0.4.0" },
+      { name: "@pegma/storage-cloudflare-d1", version: "0.4.0" },
+    ]);
+    for (const adapter of manifests.slice(1)) {
+      expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
+    }
+  });
+
   it("validates package manifests and the lockfile together", async () => {
     await expect(validateRepository()).resolves.toBeDefined();
   });

@@ -89,6 +89,19 @@ recreating the same logical key increments its retained version rather than
 starting again at `1`. A version token therefore cannot become valid again
 after delete and recreate.
 
+## Authoritative scans
+
+`CollectionStore.scan` reads one bounded page across every logical partition
+in a collection. D1 uses its physical `(partition_key, row_key)` primary key as
+the internal continuation position, then returns the logical physical
+`EntityKey`, decoded value, and opaque version. Tombstones are never returned.
+
+Cursors are opaque and scoped to this adapter and collection. Persist and pass
+them back unchanged; a null continuation ends the current cycle. The query's
+key ordering is an implementation detail, not a public ordering or snapshot
+promise. Concurrent writes can repeat a row or defer it until a later complete
+cycle.
+
 ## Transactions
 
 `transact` uses `D1Database.batch()`, which D1 executes as an atomic SQL

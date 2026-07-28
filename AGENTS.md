@@ -77,10 +77,12 @@ dependency-ordered. See `docs/RELEASING.md`.
 
 ## Where things stand
 
-`@pegma/storage-core` and `@pegma/storage-azure-tables` are both published at
-`0.3.0`. The port offers keyed access, optimistic concurrency through `update`,
-version-conditional `putIfUnchanged` and `deleteIfUnchanged`, partition reads,
-and `transact`.
+`@pegma/storage-core` and `@pegma/storage-azure-tables` are published at
+`0.3.0`; `@pegma/storage-cloudflare-d1` is published at `0.1.0`. The next
+repository-wide release is `0.4.0` for all three. The port offers keyed access,
+optimistic concurrency through `update`, version-conditional
+`putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
+authoritative cross-partition scans, and `transact`.
 
 Known gaps, in the order they are likely to matter:
 
@@ -88,9 +90,10 @@ Known gaps, in the order they are likely to matter:
   responsibility. `transact` is the primitive it needs; the shape should be
   designed against a real consumer rather than guessed.
 - No cross-partition atomicity, deliberately, and unlikely to change.
-- Reads are by key or by whole partition. No server-side filtering, ordering,
-  or secondary indexes. A component that needs a second access path maintains
-  its own index collection.
+- Reads are by key, whole partition, or bounded unfiltered collection scan. No
+  server-side filtering, ordering, or secondary indexes. A component that
+  needs a second access path maintains its own index collection; the
+  authoritative scan is the recovery path when such an index is incomplete.
 
 Siblings: [spine](https://github.com/pegma-dev/spine),
 [authorization-core](https://github.com/pegma-dev/authorization-core), and the

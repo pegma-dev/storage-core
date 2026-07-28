@@ -8,7 +8,7 @@ having to know what the database is.
 
 > [!IMPORTANT]
 > Storage Core is in early `0.x` development. Its public API is not stable,
-> its packages are not published, and it is not ready for production use.
+> and it is not ready for production use.
 
 ## Why it exists
 
@@ -141,6 +141,37 @@ for (const row of await collection.listVersioned("session")) {
 A false return means the record changed or is already gone. Both mean leave
 it alone, not something went wrong.
 
+## Scanning a collection authoritatively
+
+Maintenance work that must recover records even when a secondary index is
+missing can use bounded, cross-partition `scan` pages:
+
+```ts
+let cursor: string | undefined;
+do {
+  const page = await collection.scan({
+    limit: 100,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+
+  for (const row of page.records) {
+    await processIdempotently(row.key, row.value, row.version);
+  }
+
+  if (page.nextCursor === null) break;
+  cursor = page.nextCursor;
+} while (true);
+```
+
+The adapter issues the opaque cursor; persist and return it unchanged. A page
+contains at most the requested limit, and `nextCursor: null` ends that cycle.
+The scan returns the physical stored `EntityKey`, decoded value, and opaque
+version. It has no filtering, ordering, or snapshot promise. Concurrent writes
+may repeat a row or defer it until a later cycle, so effects must be idempotent
+and conditional work must use the returned key and version. Repeated complete
+cycles cannot omit a committed live row forever absent perpetual failure or
+perpetual writes.
+
 ## Conformance is the specification
 
 `@pegma/storage-core/conformance` exports the behaviour every backend must
@@ -150,7 +181,9 @@ exhibit, as plain test cases with no test-framework dependency:
 import { conformanceCases } from "@pegma/storage-core/conformance";
 
 for (const testCase of conformanceCases) {
-  it(testCase.name, () => testCase.run(() => createMyStore()));
+  it(testCase.name, () =>
+    testCase.run(() => createMyStoreOverTheSameEmptyBackend()),
+  );
 }
 ```
 
@@ -171,9 +204,9 @@ and what you decode is what the last writer decided.
 
 - **Transactions across records.** Multi-record changes are ordinary sequences
   of calls, and the ordering is the caller's correctness argument.
-- **Server-side queries.** Reads are by key or by partition. Filtering,
-  sorting, and limiting happen in your code, which keeps the port honest about
-  what a key-value backend can actually do.
+- **Server-side queries.** Reads are by key, by partition, or an unfiltered
+  bounded collection scan. Filtering and sorting happen in your code, which
+  keeps the port honest about what a key-value backend can actually do.
 - **Secondary indexes.** Look-ups by a non-key field are a partition scan, or
   an index collection you maintain yourself.
 
@@ -183,7 +216,7 @@ and what you decode is what the last writer decided.
 | ------------------------------ | ------------------------------------------ |
 | `createMemoryStore`            | included; the reference implementation     |
 | `@pegma/storage-azure-tables`  | available; passes the same conformance run |
-| `@pegma/storage-cloudflare-d1` | implemented; first publish is still manual |
+| `@pegma/storage-cloudflare-d1` | available; passes the same conformance run |
 
 The in-memory store is not only for tests. It enforces the same concurrency
 rules as a real backend, so an assembled application runs correctly before

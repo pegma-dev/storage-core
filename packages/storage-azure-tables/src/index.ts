@@ -7,6 +7,7 @@ import type {
 import {
   assertOnePartition,
   ConcurrencyError,
+  MAX_SCAN_PAGE_SIZE,
   StorageError,
   type TransactionRejection,
   type CollectionDefinition,
@@ -17,6 +18,8 @@ import {
   type StoredValue,
   type VersionedRecord,
 } from "@pegma/storage-core";
+
+const AZURE_SCAN_CURSOR_PREFIX = "pegma-azure-tables-scan-v1:";
 
 /**
  * Properties the table itself owns. A record may not use these names, because
@@ -57,6 +60,60 @@ function isStatus(error: unknown, code: number): boolean {
 
 /** Azure refuses an entity-group transaction larger than this. */
 const MAX_TRANSACTION_ACTIONS = 100;
+
+interface AzureScanCursor {
+  readonly collection: string;
+  readonly continuation: string;
+}
+
+function assertScanLimit(limit: number): void {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SCAN_PAGE_SIZE) {
+    throw new StorageError(
+      `Scan limit must be an integer from 1 through ${MAX_SCAN_PAGE_SIZE}.`,
+    );
+  }
+}
+
+function encodeScanCursor(collection: string, continuation: string): string {
+  return `${AZURE_SCAN_CURSOR_PREFIX}${encodeURIComponent(
+    JSON.stringify({
+      collection,
+      continuation,
+    } satisfies AzureScanCursor),
+  )}`;
+}
+
+function decodeScanCursor(collection: string, cursor: string): string {
+  try {
+    if (!cursor.startsWith(AZURE_SCAN_CURSOR_PREFIX)) {
+      throw new Error("wrong cursor kind");
+    }
+    const parsed = JSON.parse(
+      decodeURIComponent(cursor.slice(AZURE_SCAN_CURSOR_PREFIX.length)),
+    ) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Object.keys(parsed).sort().join(",") !== "collection,continuation"
+    ) {
+      throw new Error("wrong cursor shape");
+    }
+    const value = parsed as Partial<AzureScanCursor>;
+    if (
+      value.collection !== collection ||
+      typeof value.continuation !== "string" ||
+      value.continuation.length === 0
+    ) {
+      throw new Error("foreign cursor");
+    }
+    return value.continuation;
+  } catch (error) {
+    throw new StorageError(
+      `Scan cursor is malformed or does not belong to collection ${JSON.stringify(collection)}.`,
+      { cause: error },
+    );
+  }
+}
 
 /**
  * Maps a refused transaction onto the port's vocabulary.
@@ -257,6 +314,27 @@ export function createAzureTablesStore(
         return { value: codec.decode(decode(entity)), version: entity.etag };
       }
 
+      function scanRecord(entity: TableEntityResult<Record<string, unknown>>) {
+        const prefix = `${name}:`;
+        const { partitionKey: storedPartition, rowKey: storedId } = entity;
+        if (
+          typeof storedPartition !== "string" ||
+          typeof storedId !== "string" ||
+          !storedPartition.startsWith(prefix)
+        ) {
+          throw new StorageError(
+            `Authoritative scan for ${name} received a row from another collection.`,
+          );
+        }
+        return {
+          key: {
+            partition: storedPartition.slice(prefix.length),
+            id: storedId,
+          },
+          ...versioned(entity),
+        };
+      }
+
       return {
         async get(key) {
           const entity = await read(key);
@@ -372,6 +450,41 @@ export function createAzureTablesStore(
             found.push(versioned(entity));
           }
           return found;
+        },
+
+        async scan(options) {
+          assertScanLimit(options.limit);
+          await ensureTable();
+          const continuationToken =
+            options.cursor === undefined
+              ? undefined
+              : decodeScanCursor(name, options.cursor);
+          const prefix = `${name}:`;
+          const filter = [
+            `PartitionKey ge ${odataLiteral(prefix)}`,
+            `PartitionKey lt ${odataLiteral(`${name};`)}`,
+          ].join(" and ");
+          const pages = client
+            .listEntities<Record<string, unknown>>({
+              queryOptions: { filter },
+            })
+            .byPage({
+              maxPageSize: options.limit,
+              ...(continuationToken === undefined ? {} : { continuationToken }),
+            });
+          const next = await pages.next();
+          if (next.done) {
+            return { records: [], nextCursor: null };
+          }
+          const page = next.value;
+          const nextContinuation = page.continuationToken;
+          return {
+            records: page.map(scanRecord),
+            nextCursor:
+              nextContinuation === undefined
+                ? null
+                : encodeScanCursor(name, nextContinuation),
+          };
         },
 
         async delete(key) {

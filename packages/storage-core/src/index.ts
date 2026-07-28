@@ -92,6 +92,39 @@ export interface VersionedRecord<T> {
   readonly version: string;
 }
 
+/** Largest page a collection-wide authoritative scan may request. */
+export const MAX_SCAN_PAGE_SIZE = 1_000;
+
+/**
+ * One physical row returned by an authoritative collection scan.
+ *
+ * `key` is the key the adapter read, not one recomputed from the decoded
+ * value. `version` may be passed to conditional operations on the same
+ * adapter.
+ */
+export interface ScanRecord<T> extends VersionedRecord<T> {
+  readonly key: EntityKey;
+}
+
+export interface ScanOptions {
+  /** Positive integer no larger than {@link MAX_SCAN_PAGE_SIZE}. */
+  readonly limit: number;
+  /**
+   * Opaque adapter-issued continuation from the preceding page.
+   *
+   * Omit this to begin a new scan cycle. Persist and pass it back unchanged;
+   * malformed cursors and cursors from another adapter or collection fail.
+   */
+  readonly cursor?: string;
+}
+
+export interface ScanPage<T> {
+  /** At most the requested number of physical rows. */
+  readonly records: readonly ScanRecord<T>[];
+  /** Continuation for the next page, or null when this cycle is complete. */
+  readonly nextCursor: string | null;
+}
+
 export interface InsertResult<T> {
   /** False when a record already existed; `value` is then the existing one. */
   readonly inserted: boolean;
@@ -194,6 +227,22 @@ export interface CollectionStore<T> {
   /** Like {@link list}, but also reports the version of each record. */
   listVersioned(partition: string): Promise<VersionedRecord<T>[]>;
 
+  /**
+   * Reads one bounded page across every partition in this collection.
+   *
+   * This is the authoritative enumeration path for maintenance work that
+   * cannot rely on a caller-maintained secondary index. It offers no filter,
+   * ordering, or snapshot guarantee. Concurrent changes may produce
+   * duplicates or defer a row until a later cycle, so consumers must make
+   * effects idempotent and use the returned physical key and version for
+   * conditional work.
+   *
+   * A cycle starts without a cursor and ends when `nextCursor` is null.
+   * Repeated complete cycles cannot omit a committed live row forever unless
+   * calls keep failing or writes keep racing forever.
+   */
+  scan(options: ScanOptions): Promise<ScanPage<T>>;
+
   /** Returns false if there was nothing to delete. */
   delete(key: EntityKey): Promise<boolean>;
 
@@ -284,7 +333,7 @@ export interface Store {
 
 interface StoredRow {
   readonly record: StoredRecord;
-  readonly version: number;
+  readonly version: bigint;
 }
 
 /** Partitions hold rows by id; a collection holds partitions by name. */
@@ -331,6 +380,129 @@ function upsertMap<K, V>(map: Map<K, V>, key: K, create: () => V): V {
   return created;
 }
 
+const MEMORY_SCAN_CURSOR_PREFIX = "pegma-memory-scan-v1:";
+
+interface MemoryScanCursor {
+  readonly collection: string;
+  readonly partition: string;
+  readonly id: string;
+}
+
+function assertScanLimit(limit: number): void {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SCAN_PAGE_SIZE) {
+    throw new StorageError(
+      `Scan limit must be an integer from 1 through ${MAX_SCAN_PAGE_SIZE}.`,
+    );
+  }
+}
+
+function encodeMemoryScanCursor(collection: string, key: EntityKey): string {
+  return `${MEMORY_SCAN_CURSOR_PREFIX}${encodeURIComponent(
+    JSON.stringify({
+      collection,
+      partition: key.partition,
+      id: key.id,
+    } satisfies MemoryScanCursor),
+  )}`;
+}
+
+function decodeMemoryScanCursor(collection: string, cursor: string): EntityKey {
+  try {
+    if (!cursor.startsWith(MEMORY_SCAN_CURSOR_PREFIX)) {
+      throw new Error("wrong cursor kind");
+    }
+    const parsed = JSON.parse(
+      decodeURIComponent(cursor.slice(MEMORY_SCAN_CURSOR_PREFIX.length)),
+    ) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Object.keys(parsed).sort().join(",") !== "collection,id,partition"
+    ) {
+      throw new Error("wrong cursor shape");
+    }
+    const value = parsed as Partial<MemoryScanCursor>;
+    if (
+      value.collection !== collection ||
+      typeof value.partition !== "string" ||
+      typeof value.id !== "string"
+    ) {
+      throw new Error("foreign cursor");
+    }
+    return { partition: value.partition, id: value.id };
+  } catch (error) {
+    throw new StorageError(
+      `Scan cursor is malformed or does not belong to collection ${JSON.stringify(collection)}.`,
+      { cause: error },
+    );
+  }
+}
+
+function compareKeys(left: EntityKey, right: EntityKey): number {
+  if (left.partition < right.partition) {
+    return -1;
+  }
+  if (left.partition > right.partition) {
+    return 1;
+  }
+  if (left.id < right.id) {
+    return -1;
+  }
+  if (left.id > right.id) {
+    return 1;
+  }
+  return 0;
+}
+
+interface MemoryScanCandidate {
+  readonly key: EntityKey;
+  readonly row: StoredRow;
+}
+
+/** Adds one candidate while keeping the largest key at index zero. */
+function pushMemoryScanCandidate(
+  heap: MemoryScanCandidate[],
+  candidate: MemoryScanCandidate,
+): void {
+  heap.push(candidate);
+  let index = heap.length - 1;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareKeys(heap[parent]!.key, heap[index]!.key) >= 0) {
+      break;
+    }
+    [heap[parent], heap[index]] = [heap[index]!, heap[parent]!];
+    index = parent;
+  }
+}
+
+/** Restores the max-heap after replacing its largest candidate. */
+function sinkMemoryScanCandidate(heap: MemoryScanCandidate[]): void {
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let largest = index;
+    if (
+      left < heap.length &&
+      compareKeys(heap[left]!.key, heap[largest]!.key) > 0
+    ) {
+      largest = left;
+    }
+    if (
+      right < heap.length &&
+      compareKeys(heap[right]!.key, heap[largest]!.key) > 0
+    ) {
+      largest = right;
+    }
+    if (largest === index) {
+      return;
+    }
+    [heap[index], heap[largest]] = [heap[largest]!, heap[index]!];
+    index = largest;
+  }
+}
+
 /**
  * Creates an in-process {@link Store} that keeps everything in memory.
  *
@@ -341,6 +513,7 @@ function upsertMap<K, V>(map: Map<K, V>, key: K, create: () => V): V {
  */
 export function createMemoryStore(): Store {
   const collections = new Map<string, Partitions>();
+  let versionGeneration = 0n;
 
   return {
     collection<T>(definition: CollectionDefinition<T>): CollectionStore<T> {
@@ -362,13 +535,14 @@ export function createMemoryStore(): Store {
         };
       }
 
-      function write(key: EntityKey, value: T, version: number): T {
+      function write(key: EntityKey, value: T): T {
         const record = codec.encode(value);
+        versionGeneration += 1n;
         upsertMap(
           partitions,
           key.partition,
           (): Map<string, StoredRow> => new Map(),
-        ).set(key.id, { record, version });
+        ).set(key.id, { record, version: versionGeneration });
         // Decode what was stored rather than echoing the input, so callers see
         // the same value a later `get` would return.
         return codec.decode(record);
@@ -397,12 +571,12 @@ export function createMemoryStore(): Store {
           if (existing !== undefined) {
             return { inserted: false, value: codec.decode(existing.record) };
           }
-          return { inserted: true, value: write(key, value, 1) };
+          return { inserted: true, value: write(key, value) };
         },
 
         async put(value) {
           const key = definition.key(value);
-          write(key, value, (read(key)?.version ?? 0) + 1);
+          write(key, value);
         },
 
         async putIfUnchanged(value, version) {
@@ -411,7 +585,7 @@ export function createMemoryStore(): Store {
           if (row === undefined || String(row.version) !== version) {
             return false;
           }
-          write(key, value, row.version + 1);
+          write(key, value);
           return true;
         },
 
@@ -431,11 +605,11 @@ export function createMemoryStore(): Store {
             // Re-read rather than trusting `before`: awaiting the decider
             // gives another writer the chance to land in between.
             const now = read(key);
-            if ((now?.version ?? 0) !== (before?.version ?? 0)) {
+            if ((now?.version ?? 0n) !== (before?.version ?? 0n)) {
               continue;
             }
 
-            const stored = write(key, decision.value, (now?.version ?? 0) + 1);
+            const stored = write(key, decision.value);
             return { written: true, value: stored, attempts: attempt };
           }
 
@@ -452,6 +626,46 @@ export function createMemoryStore(): Store {
         async listVersioned(partition) {
           const rows = partitions.get(partition);
           return rows === undefined ? [] : [...rows.values()].map(versioned);
+        },
+
+        async scan(options) {
+          assertScanLimit(options.limit);
+          const after =
+            options.cursor === undefined
+              ? null
+              : decodeMemoryScanCursor(definition.name, options.cursor);
+          const found: MemoryScanCandidate[] = [];
+          let hasMore = false;
+          for (const [partition, rows] of partitions) {
+            for (const [id, row] of rows) {
+              const key = { partition, id };
+              if (after === null || compareKeys(key, after) > 0) {
+                const candidate = { key, row };
+                if (found.length < options.limit) {
+                  pushMemoryScanCandidate(found, candidate);
+                } else {
+                  hasMore = true;
+                  if (compareKeys(key, found[0]!.key) < 0) {
+                    found[0] = candidate;
+                    sinkMemoryScanCandidate(found);
+                  }
+                }
+              }
+            }
+          }
+          found.sort((left, right) => compareKeys(left.key, right.key));
+          return {
+            records: found.map(({ key, row }) => ({
+              key,
+              ...versioned(row),
+            })),
+            nextCursor: hasMore
+              ? encodeMemoryScanCursor(
+                  definition.name,
+                  found[found.length - 1]!.key,
+                )
+              : null,
+          };
         },
 
         async delete(key) {
@@ -518,7 +732,7 @@ export function createMemoryStore(): Store {
               partitions.get(key.partition)?.delete(key.id);
               dropIfEmpty(key.partition);
             } else {
-              write(key, step.value, (read(key)?.version ?? 0) + 1);
+              write(key, step.value);
             }
           }
 

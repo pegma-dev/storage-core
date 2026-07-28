@@ -37,6 +37,19 @@ Records are written whole, using `Replace` rather than `Merge`. A field set to
 null by your codec therefore clears reliably, which is not true of a merge
 write.
 
+## Authoritative scans
+
+`CollectionStore.scan` enumerates bounded pages across every logical partition
+in a collection. The adapter constrains the Azure query to that collection's
+partition-key prefix and wraps Azure's continuation token in a cursor scoped
+to this adapter and collection.
+
+The returned key comes from the entity's actual partition and row keys, while
+the version is its ETag. Cursors are opaque and may be persisted across store
+instances that point at the same table. A null continuation ends one cycle;
+start another without a cursor. Azure scans are not snapshots, offer no public
+ordering guarantee, and may repeat or defer rows during concurrent writes.
+
 ## Constraints it enforces for you
 
 - Collection names may not contain `:`, which separates collection from
