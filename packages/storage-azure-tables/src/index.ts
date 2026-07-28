@@ -58,33 +58,6 @@ function isStatus(error: unknown, code: number): boolean {
   return statusCode(error) === code;
 }
 
-/**
- * Confirms that an error while resuming involved a continuation token the
- * Azure SDK cannot decode. Inspecting the token itself avoids guessing from
- * the error class: a valid token may coincide with a service, authentication,
- * response-parsing, or transport failure that callers need to classify.
- */
-function isMalformedContinuationToken(continuationToken: string): boolean {
-  try {
-    const parsed = JSON.parse(atob(continuationToken)) as unknown;
-    if (typeof parsed !== "object" || parsed === null) {
-      return true;
-    }
-    const token = parsed as {
-      readonly nextPartitionKey?: unknown;
-      readonly nextRowKey?: unknown;
-    };
-    return (
-      typeof token.nextPartitionKey !== "string" ||
-      token.nextPartitionKey.length === 0 ||
-      (token.nextRowKey !== undefined &&
-        (typeof token.nextRowKey !== "string" || token.nextRowKey.length === 0))
-    );
-  } catch {
-    return true;
-  }
-}
-
 /** Azure refuses an entity-group transaction larger than this. */
 const MAX_TRANSACTION_ACTIONS = 100;
 
@@ -499,25 +472,11 @@ export function createAzureTablesStore(
               maxPageSize: options.limit,
               ...(continuationToken === undefined ? {} : { continuationToken }),
             });
-          let page;
-          try {
-            const next = await pages.next();
-            if (next.done) {
-              return { records: [], nextCursor: null };
-            }
-            page = next.value;
-          } catch (error) {
-            if (
-              continuationToken === undefined ||
-              !isMalformedContinuationToken(continuationToken)
-            ) {
-              throw error;
-            }
-            throw new StorageError(
-              `Scan cursor is malformed or does not belong to collection ${JSON.stringify(name)}.`,
-              { cause: error },
-            );
+          const next = await pages.next();
+          if (next.done) {
+            return { records: [], nextCursor: null };
           }
+          const page = next.value;
           const nextContinuation = page.continuationToken;
           return {
             records: page.map(scanRecord),

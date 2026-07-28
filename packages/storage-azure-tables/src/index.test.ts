@@ -58,14 +58,13 @@ function pageWithContinuation(continuationToken: string) {
 }
 
 function resumedScanWithFailure(error: unknown) {
-  const validSdkContinuation = Buffer.from(
-    JSON.stringify({ nextPartitionKey: `${scanErrors.name}:all` }),
-  ).toString("base64");
   const next = vi
     .fn()
     .mockResolvedValueOnce({
       done: false,
-      value: pageWithContinuation(validSdkContinuation),
+      // SDK continuation tokens are opaque to this adapter. This deliberately
+      // does not match the currently installed SDK's internal representation.
+      value: pageWithContinuation("future-sdk-token-format"),
     })
     .mockRejectedValueOnce(error);
   const client = {
@@ -123,7 +122,7 @@ describe("Azure scan errors", () => {
     });
   }
 
-  it("classifies a genuinely malformed SDK continuation token", async () => {
+  it("propagates the SDK error for a malformed nested continuation token", async () => {
     const malformedSdkToken = Buffer.from("{").toString("base64");
     const cursor = `pegma-azure-tables-scan-v1:${encodeURIComponent(
       JSON.stringify({
@@ -137,11 +136,8 @@ describe("Azure scan errors", () => {
       .scan({ limit: 1, cursor })
       .catch((error: unknown) => error);
 
-    expect(failure).toBeInstanceOf(StorageError);
-    expect(failure).toMatchObject({
-      message: expect.stringMatching(/Scan cursor is malformed/),
-      cause: expect.any(SyntaxError),
-    });
+    expect(failure).toBeInstanceOf(SyntaxError);
+    expect(failure).not.toBeInstanceOf(StorageError);
   });
 });
 
