@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 
-import { ConcurrencyError, defineCollection, type Store } from "./index.js";
+import {
+  ConcurrencyError,
+  defineCollection,
+  MAX_SCAN_PAGE_SIZE,
+  type ScanRecord,
+  type Store,
+} from "./index.js";
 
 /**
  * The behaviour every {@link Store} implementation must exhibit.
@@ -21,8 +27,9 @@ import { ConcurrencyError, defineCollection, type Store } from "./index.js";
 export interface ConformanceCase {
   readonly name: string;
   /**
-   * `createStore` must return a store with no records in the collections this
-   * suite uses. Returning a fresh instance per call is the simplest way.
+   * Stores returned during one case must share one initially empty physical
+   * backend. Adapters should return a fresh store instance per call so cases
+   * prove that guarantees do not depend on process-local state.
    */
   run(createStore: () => Store): Promise<void>;
 }
@@ -63,6 +70,19 @@ const others = defineCollection<Widget>({
   codec: widgets.codec,
 });
 
+const decodedKeysDiffer = defineCollection<Widget>({
+  name: "pegma_conformance_decoded_keys_differ",
+  key: widgets.key,
+  codec: {
+    encode: widgets.codec.encode,
+    decode: (record) => ({
+      ...widgets.codec.decode(record),
+      group: `decoded-${String(record["group"])}`,
+      id: `decoded-${String(record["id"])}`,
+    }),
+  },
+});
+
 function widget(overrides: Partial<Widget> = {}): Widget {
   return {
     group: "tools",
@@ -79,6 +99,13 @@ function testCase(
   run: (store: Store) => Promise<void>,
 ): ConformanceCase {
   return { name, run: (createStore) => run(createStore()) };
+}
+
+function storeFactoryCase(
+  name: string,
+  run: (createStore: () => Store) => Promise<void>,
+): ConformanceCase {
+  return { name, run };
 }
 
 export const conformanceCases: readonly ConformanceCase[] = [
@@ -279,6 +306,266 @@ export const conformanceCases: readonly ConformanceCase[] = [
     const collection = store.collection(widgets);
     assert.deepEqual(await collection.list("empty"), []);
   }),
+
+  testCase(
+    "scan returns bounded pages across every partition and closes the cycle",
+    async (store) => {
+      const collection = store.collection(widgets);
+      const expected = [
+        widget({ group: "tools", id: "hammer" }),
+        widget({ group: "tools", id: "wrench" }),
+        widget({ group: "toys", id: "ball" }),
+        widget({ group: "toys", id: "blocks" }),
+        widget({ group: "yard", id: "rake" }),
+      ];
+      for (const value of expected) {
+        await collection.put(value);
+      }
+
+      const found: ScanRecord<Widget>[] = [];
+      const seenCursors = new Set<string>();
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        pages += 1;
+        assert.ok(pages <= expected.length + 1, "scan cycle did not terminate");
+        const page = await store
+          .collection(widgets)
+          .scan({ limit: 2, ...(cursor === undefined ? {} : { cursor }) });
+        assert.ok(page.records.length <= 2);
+        found.push(...page.records);
+        if (page.nextCursor === null) {
+          cursor = undefined;
+          break;
+        }
+        assert.equal(typeof page.nextCursor, "string");
+        assert.equal(seenCursors.has(page.nextCursor), false);
+        seenCursors.add(page.nextCursor);
+        cursor = page.nextCursor;
+      } while (true);
+
+      assert.deepEqual(
+        found.map(({ key }) => `${key.partition}/${key.id}`).sort(),
+        expected
+          .map((value) => widgets.key(value))
+          .map((key) => `${key.partition}/${key.id}`)
+          .sort(),
+      );
+      assert.equal(new Set(found.map(({ version }) => version)).size > 0, true);
+
+      // A null continuation closes this cycle. Omitting a cursor starts a new
+      // one, so stable committed rows remain discoverable indefinitely.
+      const restarted = await store.collection(widgets).scan({ limit: 2 });
+      assert.ok(restarted.records.length > 0);
+    },
+  ),
+
+  storeFactoryCase(
+    "scan continuation replay is repeat-safe and may duplicate a page",
+    async (createStore) => {
+      const collection = createStore().collection(widgets);
+      for (const id of ["a", "b", "c"]) {
+        await collection.put(widget({ id }));
+      }
+
+      const first = await collection.scan({ limit: 1 });
+      assert.equal(first.records.length, 1);
+      assert.notEqual(first.nextCursor, null);
+      const cursor = first.nextCursor as string;
+      const once = await createStore()
+        .collection(widgets)
+        .scan({ limit: 1, cursor });
+      const replay = await createStore()
+        .collection(widgets)
+        .scan({ limit: 1, cursor });
+
+      assert.deepEqual(replay, once);
+      assert.equal(once.records.length, 1);
+
+      const returned = first.records[0]!;
+      assert.equal(
+        await collection.deleteIfUnchanged(returned.key, returned.version),
+        true,
+      );
+      const afterDelete = await createStore()
+        .collection(widgets)
+        .scan({ limit: 1, cursor });
+      assert.equal(afterDelete.records.length, 1);
+      assert.notDeepEqual(afterDelete.records[0]?.key, returned.key);
+    },
+  ),
+
+  testCase(
+    "scan reports the stored physical key rather than recomputing it",
+    async (store) => {
+      const collection = store.collection(decodedKeysDiffer);
+      await collection.put(widget({ group: "tools", id: "hammer" }));
+
+      const page = await collection.scan({ limit: 1 });
+      assert.equal(page.records.length, 1);
+      assert.deepEqual(page.records[0]?.key, {
+        partition: "tools",
+        id: "hammer",
+      });
+      assert.equal(page.records[0]?.value.group, "decoded-tools");
+      assert.equal(page.records[0]?.value.id, "decoded-hammer");
+    },
+  ),
+
+  storeFactoryCase(
+    "a fresh store scan sees committed work but no precommit phantom",
+    async (createStore) => {
+      const collection = createStore().collection(widgets);
+      let release = (): void => {};
+      let reached = (): void => {};
+      const paused = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const deciding = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      const writing = collection.update(
+        { partition: "tools", id: "pending" },
+        async () => {
+          reached();
+          await paused;
+          return {
+            action: "write",
+            value: widget({ id: "pending", label: "committed" }),
+          };
+        },
+      );
+
+      await deciding;
+      const before = await createStore()
+        .collection(widgets)
+        .scan({ limit: 10 });
+      assert.equal(
+        before.records.some(({ key }) => key.id === "pending"),
+        false,
+      );
+
+      release();
+      await writing;
+      const after = await createStore().collection(widgets).scan({ limit: 10 });
+      assert.equal(
+        after.records.some(
+          ({ key, value }) =>
+            key.partition === "tools" &&
+            key.id === "pending" &&
+            value.label === "committed",
+        ),
+        true,
+      );
+    },
+  ),
+
+  testCase(
+    "repeated scan cycles eventually expose a row changed behind a cursor",
+    async (store) => {
+      const collection = store.collection(widgets);
+      for (const id of ["a", "b", "c"]) {
+        await collection.put(widget({ id, count: 1 }));
+      }
+
+      const first = await collection.scan({ limit: 1 });
+      const seen = first.records[0];
+      assert.notEqual(seen, undefined);
+      await collection.put({ ...seen!.value, count: 2 });
+
+      // Finish the in-flight cycle without assuming whether the backend
+      // repeats the changed row or defers it.
+      let cursor = first.nextCursor;
+      const observedCursors = new Set<string>();
+      let remainingPages = 0;
+      while (cursor !== null) {
+        remainingPages += 1;
+        assert.ok(
+          remainingPages <= 4,
+          "in-flight scan cycle did not terminate",
+        );
+        assert.equal(observedCursors.has(cursor), false);
+        observedCursors.add(cursor);
+        const page = await collection.scan({ limit: 1, cursor });
+        cursor = page.nextCursor;
+      }
+
+      const nextCycle: ScanRecord<Widget>[] = [];
+      let nextCursor: string | undefined;
+      let nextPages = 0;
+      do {
+        nextPages += 1;
+        assert.ok(nextPages <= 4, "next scan cycle did not terminate");
+        const page = await store.collection(widgets).scan({
+          limit: 1,
+          ...(nextCursor === undefined ? {} : { cursor: nextCursor }),
+        });
+        nextCycle.push(...page.records);
+        if (page.nextCursor === null) {
+          break;
+        }
+        nextCursor = page.nextCursor;
+      } while (true);
+
+      const changed = nextCycle.find(
+        ({ key }) =>
+          key.partition === seen!.key.partition && key.id === seen!.key.id,
+      );
+      assert.equal(changed?.value.count, 2);
+      assert.notEqual(changed?.version, seen!.version);
+    },
+  ),
+
+  testCase(
+    "scan versions stay safe across delete and recreate",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ label: "before" }));
+      const before = (await collection.scan({ limit: 1 })).records[0];
+      assert.notEqual(before, undefined);
+
+      assert.equal(await collection.delete(before!.key), true);
+      await collection.put(widget({ label: "recreated" }));
+      const recreated = (await collection.scan({ limit: 1 })).records[0];
+      assert.notEqual(recreated, undefined);
+      assert.equal(recreated?.value.label, "recreated");
+      assert.notEqual(recreated?.version, before?.version);
+      assert.equal(
+        await collection.deleteIfUnchanged(before!.key, before!.version),
+        false,
+      );
+    },
+  ),
+
+  testCase(
+    "scan rejects invalid limits and malformed or foreign cursors",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ id: "a" }));
+      await collection.put(widget({ id: "b" }));
+
+      for (const limit of [0, -1, 1.5, MAX_SCAN_PAGE_SIZE + 1]) {
+        await assert.rejects(collection.scan({ limit }), /Scan limit/);
+      }
+      await assert.rejects(
+        collection.scan({ limit: 1, cursor: "not-a-scan-cursor" }),
+        /Scan cursor/,
+      );
+
+      const other = store.collection(others);
+      await other.put(widget({ id: "a" }));
+      await other.put(widget({ id: "b" }));
+      const foreign = await other.scan({ limit: 1 });
+      assert.notEqual(foreign.nextCursor, null);
+      await assert.rejects(
+        collection.scan({
+          limit: 1,
+          cursor: foreign.nextCursor as string,
+        }),
+        /Scan cursor/,
+      );
+    },
+  ),
 
   testCase(
     "keys sharing a separator character stay distinct",

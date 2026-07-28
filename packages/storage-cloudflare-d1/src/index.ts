@@ -1,6 +1,7 @@
 import {
   assertOnePartition,
   ConcurrencyError,
+  MAX_SCAN_PAGE_SIZE,
   StorageError,
   type CollectionDefinition,
   type CollectionStore,
@@ -13,6 +14,7 @@ import {
 
 const RECORDS_TABLE = "RECORDS";
 const GUARD_TABLE = "PEGMA_STORAGE_D1_TX_GUARD";
+const D1_SCAN_CURSOR_PREFIX = "pegma-cloudflare-d1-scan-v1:";
 
 const MARKERS = {
   exists: "PEGMA_STORAGE_D1_TX_EXISTS",
@@ -79,6 +81,23 @@ const SELECT_PARTITION = `
   SELECT record_json, CAST(version AS TEXT) AS version
   FROM ${RECORDS_TABLE}
   WHERE partition_key = ? AND deleted = 0
+`;
+
+const SCAN_FIRST = `
+  SELECT partition_key, row_key, record_json, CAST(version AS TEXT) AS version
+  FROM ${RECORDS_TABLE}
+  WHERE partition_key >= ? AND partition_key < ? AND deleted = 0
+  ORDER BY partition_key, row_key
+  LIMIT ?
+`;
+
+const SCAN_AFTER = `
+  SELECT partition_key, row_key, record_json, CAST(version AS TEXT) AS version
+  FROM ${RECORDS_TABLE}
+  WHERE partition_key >= ? AND partition_key < ? AND deleted = 0
+    AND (partition_key > ? OR (partition_key = ? AND row_key > ?))
+  ORDER BY partition_key, row_key
+  LIMIT ?
 `;
 
 const INSERT_IF_ABSENT = `
@@ -197,6 +216,17 @@ interface VersionRow {
   readonly version: string;
 }
 
+interface ScanRow extends RecordRow {
+  readonly partition_key: string;
+  readonly row_key: string;
+}
+
+interface D1ScanCursor {
+  readonly collection: string;
+  readonly partition: string;
+  readonly id: string;
+}
+
 /** The portion of a D1 query result used by this adapter. */
 export interface CloudflareD1Result<T = unknown> {
   readonly results: T[];
@@ -253,6 +283,56 @@ export interface CloudflareD1StoreOptions {
 
 function parseRecord(json: string): StoredRecord {
   return JSON.parse(json) as StoredRecord;
+}
+
+function assertScanLimit(limit: number): void {
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SCAN_PAGE_SIZE) {
+    throw new StorageError(
+      `Scan limit must be an integer from 1 through ${MAX_SCAN_PAGE_SIZE}.`,
+    );
+  }
+}
+
+function encodeScanCursor(collection: string, key: EntityKey): string {
+  return `${D1_SCAN_CURSOR_PREFIX}${encodeURIComponent(
+    JSON.stringify({
+      collection,
+      partition: key.partition,
+      id: key.id,
+    } satisfies D1ScanCursor),
+  )}`;
+}
+
+function decodeScanCursor(collection: string, cursor: string): EntityKey {
+  try {
+    if (!cursor.startsWith(D1_SCAN_CURSOR_PREFIX)) {
+      throw new Error("wrong cursor kind");
+    }
+    const parsed = JSON.parse(
+      decodeURIComponent(cursor.slice(D1_SCAN_CURSOR_PREFIX.length)),
+    ) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Object.keys(parsed).sort().join(",") !== "collection,id,partition"
+    ) {
+      throw new Error("wrong cursor shape");
+    }
+    const value = parsed as Partial<D1ScanCursor>;
+    if (
+      value.collection !== collection ||
+      typeof value.partition !== "string" ||
+      typeof value.id !== "string"
+    ) {
+      throw new Error("foreign cursor");
+    }
+    return { partition: value.partition, id: value.id };
+  } catch (error) {
+    throw new StorageError(
+      `Scan cursor is malformed or does not belong to collection ${JSON.stringify(collection)}.`,
+      { cause: error },
+    );
+  }
 }
 
 function encoded<T>(
@@ -381,6 +461,23 @@ export function createCloudflareD1Store(
         return result.results.map(decodeRow);
       }
 
+      function decodeScanRow(row: ScanRow) {
+        const prefix = `${name}:`;
+        if (!row.partition_key.startsWith(prefix)) {
+          throw new StorageError(
+            `Authoritative scan for ${name} received a row from another collection.`,
+          );
+        }
+        return {
+          key: {
+            partition: row.partition_key.slice(prefix.length),
+            id: row.row_key,
+          },
+          value: codec.decode(parseRecord(row.record_json)),
+          version: row.version,
+        };
+      }
+
       return {
         async get(key) {
           const row = await read(key);
@@ -500,6 +597,41 @@ export function createCloudflareD1Store(
         },
 
         listVersioned,
+
+        async scan(options) {
+          assertScanLimit(options.limit);
+          await ensureSchema();
+          const after =
+            options.cursor === undefined
+              ? null
+              : decodeScanCursor(name, options.cursor);
+          const prefix = `${name}:`;
+          const upper = `${name};`;
+          const requested = options.limit + 1;
+          const statement =
+            after === null
+              ? database.prepare(SCAN_FIRST).bind(prefix, upper, requested)
+              : database
+                  .prepare(SCAN_AFTER)
+                  .bind(
+                    prefix,
+                    upper,
+                    partitionKey(after.partition),
+                    partitionKey(after.partition),
+                    after.id,
+                    requested,
+                  );
+          const result = await statement.all<ScanRow>();
+          const page = result.results.slice(0, options.limit);
+          const records = page.map(decodeScanRow);
+          return {
+            records,
+            nextCursor:
+              result.results.length > options.limit
+                ? encodeScanCursor(name, records[records.length - 1]!.key)
+                : null,
+          };
+        },
 
         async delete(key) {
           await ensureSchema();

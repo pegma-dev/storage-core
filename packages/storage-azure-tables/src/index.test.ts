@@ -22,20 +22,24 @@ const CONNECTION_STRING = [
 
 let tableCounter = 0;
 
-/** A store over a table no other test has touched. */
-function freshStore() {
+/** Fresh store instances over one table no other test has touched. */
+function freshStoreFactory() {
   tableCounter += 1;
   const table = `pegmaconformance${tableCounter}t${process.pid}`;
   const client = TableClient.fromConnectionString(CONNECTION_STRING, table, {
     allowInsecureConnection: true,
   });
-  return createAzureTablesStore({ client });
+  return () => createAzureTablesStore({ client });
+}
+
+function freshStore() {
+  return freshStoreFactory()();
 }
 
 describe("createAzureTablesStore", () => {
   for (const testCase of conformanceCases) {
     it(testCase.name, async () => {
-      await testCase.run(freshStore);
+      await testCase.run(freshStoreFactory());
     });
   }
 });

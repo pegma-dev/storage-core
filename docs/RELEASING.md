@@ -47,6 +47,18 @@ The reviewed release order is:
 This keeps the port ahead of adapters that depend on it. The release script
 also requires internal dependencies to be exact workspace-version pins.
 
+### Authoritative scan release
+
+The new `CollectionStore.scan` method is a breaking port addition, so
+`@pegma/storage-core`, `@pegma/storage-azure-tables`, and
+`@pegma/storage-cloudflare-d1` release together at `0.4.0`. Both adapters pin
+core exactly at `0.4.0`.
+
+D1 advances from `0.1.0` directly to `0.4.0`. This is deliberate:
+repository-wide tags `v0.2.0` and `v0.3.0` already exist and must never be
+reused or moved. A single protected signed `v0.4.0` release selects and
+publishes all three changed packages in dependency order.
+
 ## Release procedure
 
 Change package versions through an ordinary reviewed pull request and run the

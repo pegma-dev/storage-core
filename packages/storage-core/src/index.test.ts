@@ -6,7 +6,8 @@ import { createMemoryStore, defineCollection } from "./index.js";
 describe("createMemoryStore", () => {
   for (const testCase of conformanceCases) {
     it(testCase.name, async () => {
-      await testCase.run(() => createMemoryStore());
+      const store = createMemoryStore();
+      await testCase.run(() => store);
     });
   }
 });

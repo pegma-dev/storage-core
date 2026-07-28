@@ -2,10 +2,9 @@
 
 ## Status
 
-Implemented on `claude/cloudflare-d1-adapter`, including real-D1 conformance
-coverage in the Cloudflare Workers Vitest pool. This record does not represent
-the branch as merged or the package as published. The first npm publish remains
-a manual 2FA bootstrap step; trusted publishing can be configured after that.
+Implemented and published, including real-D1 conformance coverage in the
+Cloudflare Workers Vitest pool. The `0.4.0` release adds the same authoritative
+bounded collection scan implemented by the memory and Azure adapters.
 
 Decided 2026-07-27. This is the assignment record for Storage Core's second
 real adapter — read `AGENTS.md` first; its hard rules govern everything here.
@@ -47,6 +46,10 @@ that claim, tested. It is not an invitation to a third adapter.
   a version column as the token (D1 has no ETag; a monotonic per-row version
   bumped on every write, checked in the same statement, is the honest
   equivalent).
+- `scan` walks bounded pages across the collection's physical key prefix,
+  returning the stored key, decoded record, and retained version. Its opaque
+  continuation is scoped to D1 and the collection. Tombstones remain invisible;
+  concurrent changes may repeat or defer rows until a later complete cycle.
 - `transact` maps to a SQL transaction scoped to one collection + one
   partition — same scope the port promises, no more. Note the Azure
   precedent recorded in AGENTS.md: there is deliberately no
@@ -70,11 +73,9 @@ adapters' suites on Node 22 + 24.
 
 ## Versioning and publish
 
-New `CollectionStore` methods are breaking (AGENTS.md); this work adds
-none — it is an adapter only, minor-version territory. First publish
-follows the ecosystem bootstrap rule: a new npm package cannot use trusted
-publishing until it exists (npm/cli#8544) — one manual publish with a 2FA
-code, then configure the trusted publisher and it joins the OIDC-only flow.
+New `CollectionStore` methods are breaking (AGENTS.md). The authoritative scan
+therefore advances core and both adapters together to repository-wide version
+`0.4.0`; each adapter pins `@pegma/storage-core` exactly.
 
 ## What it unblocks
 
