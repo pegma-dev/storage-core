@@ -68,13 +68,12 @@ renders blank without them. Each needs `prepack` running the build, or a stale
 Work on a `claude/*` branch and open a pull request. The gate is
 `npm run format:check`, `npm run check`, `npm test` — all three, on Node 22 and 24. `npm test` starts Azurite automatically.
 
-Publishing is trusted-publisher only; no tokens exist. A release is
-`gh release create vX.Y.Z`, which runs the gate and publishes every changed
-workspace package with a provenance attestation. The publish step is idempotent
-and dependency-ordered, so it skips versions already on the registry and never
-publishes an adapter before the port it depends on. A brand-new package cannot
-use trusted publishing for its first version: publish it once by hand, then add
-its trusted publisher on npmjs.com.
+Publishing is trusted-publisher only; no tokens exist. A release starts from a
+protected signed annotated `vX.Y.Z` tag already on `origin/main`, followed by
+`gh release create vX.Y.Z --verify-tag`. The unprivileged preparation job runs
+the gate and packs the exact artifacts; only the minimal publish job receives
+OIDC authority. Publication is integrity-checked, retry-safe, and
+dependency-ordered. See `docs/RELEASING.md`.
 
 ## Where things stand
 

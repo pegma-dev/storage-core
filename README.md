@@ -229,6 +229,9 @@ npm test
 npm run format:check
 ```
 
+Maintainers should follow [the release runbook](docs/RELEASING.md). Releases
+publish only from protected signed tags through npm trusted publishing.
+
 ## License
 
 [MIT](LICENSE) © 2026 RetireGolden, LLC

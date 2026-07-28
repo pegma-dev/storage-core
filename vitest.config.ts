@@ -5,6 +5,7 @@ export default defineConfig({
     include: [
       "packages/storage-core/src/**/*.test.ts",
       "packages/storage-azure-tables/src/**/*.test.ts",
+      "tests/**/*.test.ts",
     ],
     exclude: ["**/dist/**", "**/node_modules/**"],
     globalSetup: ["./test/azurite.ts"],
