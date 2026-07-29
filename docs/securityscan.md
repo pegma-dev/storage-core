@@ -1,0 +1,155 @@
+# Security Scan — storage-core
+
+Repository-wide security review performed 2026-07-28.
+
+Scope: all first-party source (`packages/*/src`), scripts, CI/CD workflows,
+test infrastructure, and dependency manifests. `node_modules` and packed
+artifacts under `.release/` are excluded from line-by-line review but
+dependency versions are audited.
+
+Findings are appended as they are discovered during the scan, not batched at
+the end. Severity scale: Critical / High / Medium / Low / Informational.
+
+---
+
+## Findings
+
+### 1. Vulnerable transitive dev dependencies via `azurite`
+
+- **Severity:** Medium (dev/test environment only)
+- **Evidence:** `npm audit` reports 12 vulnerabilities (5 high, 7 moderate),
+  all reachable only through the `azurite` devDependency:
+  - `brace-expansion <= 5.0.7` — DoS via unbounded expansion length /
+    out-of-memory crash (GHSA-mh99-v99m-4gvg, **high**), via
+    `azurite → rimraf → glob → minimatch`.
+  - `@opentelemetry/core < 2.8.0` — unbounded memory allocation in W3C
+    Baggage propagation (GHSA-8988-4f7v-96qf, moderate), via
+    `azurite → applicationinsights`.
+  - `uuid < 11.1.1` — missing buffer bounds check in v3/v5/v6 when `buf` is
+    provided (GHSA-w5hq-g745-h8pq, moderate), via
+    `azurite → sequelize → @azure/ms-rest-js`.
+- **File references:** `package.json` (root, devDependencies: `azurite
+  ^3.36.0`), `package-lock.json`.
+- **Exploitability:** Low in practice. None of these packages ship to
+  consumers — the published packages (`@pegma/storage-core`,
+  `@pegma/storage-azure-tables`, `@pegma/storage-cloudflare-d1`) declare only
+  `@azure/data-tables` and the workspace port as runtime dependencies, and the
+  release pipeline packs only `dist/` allowlists. The vulnerable code paths
+  run only inside the local/CI test harness (Azurite emulator process), which
+  processes no untrusted input: the only client is the adapter test suite
+  itself. Exploitation would require an attacker to feed crafted
+  baggage/glob/uuid inputs to a developer's local test run.
+- **Recommendation:** Track upstream Azurite fixes; upgrade `azurite` when a
+  release carrying patched transitive deps is available. No emergency action.
+
+### 2. Hard-coded Azurite credentials in test file
+
+- **Severity:** Informational
+- **Evidence:** `packages/storage-azure-tables/src/index.test.ts:13-21`
+  contains `devstoreaccount1` and the key
+  `Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==`.
+- **Exploitability:** None. These are the published, well-known Azurite
+  emulator defaults, identical in every Azurite installation, and the endpoint
+  is `http://127.0.0.1:<test port>` spawned by the test run itself
+  (`test/azurite.ts:17` binds `127.0.0.1`). They grant access to nothing real.
+  Secret scanners will flag them; a documented allowlist entry avoids triage
+  churn.
+- **Recommendation:** None required. Optionally add a `.gitleaks`/scanner
+  allowlist comment.
+
+### 3. D1 `transact` has no action-count limit
+
+- **Severity:** Low
+- **Evidence:** The Azure adapter caps a transaction at 100 actions before
+  touching the network (`packages/storage-azure-tables/src/index.ts:59`,
+  `:419-423`). The D1 adapter builds one prepared statement per guard/write
+  with no bound (`packages/storage-cloudflare-d1/src/index.ts:522-584`) — a
+  `putIfUnchanged` costs 3 statements, so ~34 port-level actions already
+  exceed D1's batch limits (100 statements / 1 MB SQL per batch).
+- **Exploitability:** Not attacker-reachable on its own; a host application
+  would have to pass an oversized action list. The outcome is a thrown D1
+  error, not corruption — D1 batches are atomic. It is a robustness/parity
+  gap rather than a vulnerability, logged here because a caller relying on
+  port behaviour gets an opaque failure on one backend and a clean
+  `StorageError` on the other.
+- **Recommendation:** Add a documented cap in the D1 adapter (or in
+  `assertOnePartition`) so the failure mode matches across adapters.
+
+### 4. D1 transaction rejection inferred by substring match on error text
+
+- **Severity:** Low
+- **Evidence:** `markerRejection`
+  (`packages/storage-cloudflare-d1/src/index.ts:268-281`) classifies a failed
+  batch by checking whether `error.message` *includes* marker strings such as
+  `PEGMA_STORAGE_D1_TX_CHANGED`, then reports `committed: false` instead of
+  rethrowing.
+- **Exploitability:** A genuine, unrelated D1 error whose message happens to
+  contain a marker substring would be silently misreported as a precondition
+  refusal, hiding a real failure. Bound parameters are not echoed into D1
+  error messages, so record content cannot inject the marker through normal
+  operation; the residual risk is D1 error text changes or unusual constraint
+  errors. Integrity impact (hidden failure reported as a clean conflict), not
+  confidentiality.
+- **Recommendation:** Prefer exact-match against the full error message, or
+  compare the message suffix after the known `RAISE(ABORT, ...)` prefix, so
+  incidental substring occurrences cannot misclassify.
+
+---
+
+## Areas reviewed with no findings
+
+Scan complete 2026-07-28. The following were examined and found clean:
+
+- **Injection.** All D1 queries are static strings with bound parameters
+  (`packages/storage-cloudflare-d1/src/index.ts` — every `.bind()` call site;
+  table/column names are module constants). The Azure adapter's single OData
+  filter escapes single quotes correctly
+  (`packages/storage-azure-tables/src/index.ts:98-100`) and validates key
+  parts against Azure's forbidden-character set before use (`:34-46`).
+  No `eval`, `new Function`, or string-built queries anywhere in first-party
+  source.
+- **Key-space isolation.** Both adapters compose the physical partition key
+  as `<collection>:<partition>` and both forbid `:` in collection names
+  (Azure `:207-211`, D1 `:341-345`), so two `(collection, partition)` pairs
+  cannot collide onto one physical partition.
+- **Reserved-property shadowing.** The Azure adapter rejects record fields
+  named `partitionkey`/`rowkey`/`timestamp`/`etag` case-insensitively and
+  spreads the record before the keys so the keys win regardless
+  (`:25`, `:105-109`, `:247-248`).
+- **Concurrency integrity.** Conditional writes/deletes map to ETags (Azure)
+  or version columns checked in the same statement (D1); `transact` rejects
+  cross-partition and duplicate-key batches before any I/O
+  (`packages/storage-core/src/index.ts:298-322`). Tombstone handling in D1
+  prevents version reuse after delete.
+- **Command execution.** `scripts/release-packages.mjs` and
+  `test/azurite.ts` spawn only fixed executables (`git`, `npm`, `node`) with
+  argument arrays; `shell: true` is used solely for the Windows `npm.cmd`
+  fallback, and tarball paths are passed through `basename` before use.
+  `verifyPreparedManifest` validates tarball paths stay beside the manifest
+  before reading them (`scripts/release-packages.mjs:588-592`).
+- **CI/CD.** All GitHub Actions are pinned to full-length SHAs; workflows use
+  minimal `permissions:`; no `pull_request_target`; publishing is OIDC
+  trusted-publisher only, requires a signed annotated tag verified against an
+  allowed-signers file, an exact commit match, and registry integrity
+  comparison before and after publish
+  (`.github/workflows/publish.yml`, `scripts/release-packages.mjs:639-682`).
+- **Secrets.** No credentials in tracked files beyond the documented Azurite
+  emulator defaults (finding 2). `.gitignore` excludes `.env*` and
+  `.release/`; `git ls-files` confirms no release artifacts or env files are
+  tracked.
+- **Runtime surface.** Published packages have no network calls of their own,
+  no runtime dependencies in the port, no use of `Math.random` for
+  security-relevant values, and no DOM/browser state access.
+
+## Summary
+
+| # | Severity | Title |
+|---|----------|-------|
+| 1 | Medium (dev-only) | Vulnerable transitive dev dependencies via `azurite` |
+| 2 | Informational | Hard-coded Azurite emulator credentials in tests |
+| 3 | Low | D1 `transact` has no action-count limit |
+| 4 | Low | D1 rejection inferred by substring match on error text |
+
+No Critical or High issues in first-party code. The four findings are all
+low-impact and none are exploitable through the published packages' public
+APIs.
