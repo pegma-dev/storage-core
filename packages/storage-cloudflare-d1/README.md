@@ -112,6 +112,12 @@ zero-row precondition failures into the port's `exists`, `missing`, and
 Transactions remain limited to one collection and one logical partition, as
 required by `@pegma/storage-core`.
 
+A transaction carries at most 100 actions, the same limit the Azure Tables
+adapter enforces, so an action list either works on both adapters or is
+refused by both with a `StorageError`. The limit is checked before any
+statement is sent. Each action costs one to three statements in the batch, and
+every statement counts against the Worker invocation's D1 query budget.
+
 ## License
 
 [MIT](LICENSE) © 2026 RetireGolden, LLC

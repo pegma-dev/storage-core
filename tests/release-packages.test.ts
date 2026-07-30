@@ -44,7 +44,7 @@ describe("release package metadata", () => {
     ]);
   });
 
-  it("releases the breaking scan contract and both adapters together", () => {
+  it("keeps every adapter pinned to the exact released core version", () => {
     const manifests = RELEASE_PACKAGES.map(({ directory }) =>
       JSON.parse(
         readFileSync(
@@ -58,10 +58,12 @@ describe("release package metadata", () => {
       dependencies?: Record<string, string>;
     }>;
 
+    // The scan contract released all three at 0.4.0. D1 carries a patch of
+    // its own; the port it pins stays exactly where it was published.
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
-      { name: "@pegma/storage-cloudflare-d1", version: "0.4.0" },
+      { name: "@pegma/storage-cloudflare-d1", version: "0.4.1" },
     ]);
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
