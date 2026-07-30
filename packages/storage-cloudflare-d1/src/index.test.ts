@@ -310,6 +310,95 @@ describe("D1 transaction guards", () => {
   });
 });
 
+describe("D1 transaction limits", () => {
+  it("refuses more actions than one transaction may carry, before any work", async () => {
+    let batches = 0;
+    const database = wrappedDatabase(
+      <T>(statements: CloudflareD1PreparedStatement[]) => {
+        batches += 1;
+        return env.DB.batch<T>(statements as D1PreparedStatement[]);
+      },
+    );
+    let keyCalls = 0;
+    const counted = {
+      ...widgets,
+      key: (value: Widget) => {
+        keyCalls += 1;
+        return widgets.key(value);
+      },
+    };
+    const oversized = Array.from(
+      { length: 101 },
+      (_unused, index) =>
+        ({ action: "put", value: widget(`bulk-${String(index)}`) }) as const,
+    );
+
+    await expect(
+      createCloudflareD1Store({ database })
+        .collection(counted)
+        .transact("tools", oversized),
+    ).rejects.toThrow(/at most 100 actions/);
+    expect(batches).toBe(0);
+    expect(keyCalls).toBe(0);
+    expect(
+      await collection().get({ partition: "tools", id: "bulk-0" }),
+    ).toBeNull();
+  });
+
+  it("accepts a transaction at the limit", async () => {
+    const records = collection();
+    const atLimit = Array.from(
+      { length: 100 },
+      (_unused, index) =>
+        ({ action: "put", value: widget(`sized-${String(index)}`) }) as const,
+    );
+
+    await expect(records.transact("tools", atLimit)).resolves.toEqual({
+      committed: true,
+    });
+    expect(await records.get({ partition: "tools", id: "sized-99" })).toEqual(
+      widget("sized-99"),
+    );
+  });
+});
+
+describe("D1 transaction failures", () => {
+  it("rethrows an unrelated error whose text mentions a marker", async () => {
+    let batches = 0;
+    const database = wrappedDatabase(
+      <T>(statements: CloudflareD1PreparedStatement[]) => {
+        batches += 1;
+        if (batches === 1) {
+          return env.DB.batch<T>(statements as D1PreparedStatement[]);
+        }
+        return Promise.reject(
+          new Error(
+            "D1_ERROR: no such column: PEGMA_STORAGE_D1_TX_CHANGED at offset 7: SQLITE_ERROR",
+          ),
+        );
+      },
+    );
+
+    await expect(
+      createCloudflareD1Store({ database })
+        .collection(widgets)
+        .transact("tools", [{ action: "put", value: widget("unaffected") }]),
+    ).rejects.toThrow(/no such column/);
+    expect(batches).toBe(2);
+  });
+
+  it("reports a refused precondition raised by a guard trigger", async () => {
+    const records = collection();
+    await records.put(widget("occupied"));
+
+    await expect(
+      records.transact("tools", [
+        { action: "insert", value: widget("occupied", "duplicate") },
+      ]),
+    ).resolves.toEqual({ committed: false, reason: "exists" });
+  });
+});
+
 describe("D1 collection names", () => {
   it("rejects the partition separator", () => {
     expect(() =>

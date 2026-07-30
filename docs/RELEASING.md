@@ -59,6 +59,15 @@ repository-wide tags `v0.2.0` and `v0.3.0` already exist and must never be
 reused or moved. A single protected signed `v0.4.0` release selects and
 publishes all three changed packages in dependency order.
 
+### D1 transaction-robustness patch
+
+`@pegma/storage-cloudflare-d1` goes to `0.4.1` alone: a transaction action cap
+matching the Azure adapter's, and exact-match classification of the abort
+messages its guard triggers raise. The port is unchanged, so
+`@pegma/storage-core` and `@pegma/storage-azure-tables` stay at `0.4.0` and
+must reproduce the integrity already on npm. `v0.4.1` therefore selects one
+package to publish, and D1 keeps its exact `0.4.0` pin on the port.
+
 ## Release procedure
 
 Change package versions through an ordinary reviewed pull request and run the

@@ -77,9 +77,9 @@ dependency-ordered. See `docs/RELEASING.md`.
 
 ## Where things stand
 
-`@pegma/storage-core` and `@pegma/storage-azure-tables` are published at
-`0.3.0`; `@pegma/storage-cloudflare-d1` is published at `0.1.0`. The next
-repository-wide release is `0.4.0` for all three. The port offers keyed access,
+All three packages are published at `0.4.0`, and
+`@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness patch
+of its own. The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.

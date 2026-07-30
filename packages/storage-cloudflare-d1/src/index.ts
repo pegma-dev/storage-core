@@ -22,6 +22,20 @@ const MARKERS = {
   changed: "PEGMA_STORAGE_D1_TX_CHANGED",
 } as const satisfies Record<TransactionRejection, string>;
 
+/** D1 prefixes a failed statement's message with this. */
+const D1_ERROR_PREFIX = "D1_ERROR: ";
+
+/**
+ * Largest transaction this adapter submits, matching the Azure adapter's
+ * entity-group limit so the same action list is accepted or refused by both.
+ *
+ * D1 documents no batch statement count, but every statement inside a batch
+ * counts against the Worker invocation's D1 query budget, and a guarded action
+ * costs up to three. Rejecting an oversized list here keeps the failure a
+ * `StorageError` naming the cause rather than an opaque backend error.
+ */
+const MAX_TRANSACTION_ACTIONS = 100;
+
 const schemaInitializations = new WeakMap<
   CloudflareD1Database,
   Promise<void>
@@ -345,6 +359,17 @@ function encoded<T>(
   };
 }
 
+/**
+ * Classifies a failed batch by the abort message a guard trigger raised.
+ *
+ * D1 reports `RAISE(ABORT, marker)` as
+ * `D1_ERROR: <marker>: SQLITE_CONSTRAINT (extended: SQLITE_CONSTRAINT_TRIGGER)`,
+ * so only the raised message ahead of the first `: ` is compared, and it must
+ * equal a marker exactly. An unrelated failure that merely mentions a marker
+ * somewhere in its text is a real error and must reach the caller rather than
+ * be reported as a refused precondition, which would hide it behind a conflict
+ * that never happened.
+ */
 function markerRejection(error: unknown): TransactionRejection | null {
   const message =
     error instanceof Error
@@ -352,8 +377,13 @@ function markerRejection(error: unknown): TransactionRejection | null {
       : typeof error === "string"
         ? error
         : "";
+  const reported = message.startsWith(D1_ERROR_PREFIX)
+    ? message.slice(D1_ERROR_PREFIX.length)
+    : message;
+  const end = reported.indexOf(": ");
+  const raised = end === -1 ? reported : reported.slice(0, end);
   for (const reason of ["exists", "missing", "changed"] as const) {
-    if (message.includes(MARKERS[reason])) {
+    if (raised === MARKERS[reason]) {
       return reason;
     }
   }
@@ -652,6 +682,16 @@ export function createCloudflareD1Store(
         },
 
         async transact(partition, actions) {
+          // Checked from the length alone, before the caller's key function
+          // runs over every action: an oversized list is refused either way,
+          // and there is no reason to derive keys for a batch that cannot be
+          // submitted.
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
+            );
+          }
+
           const keys = actions.map((step) =>
             step.action === "delete" ? step.key : definition.key(step.value),
           );
