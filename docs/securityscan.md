@@ -28,8 +28,8 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
   - `uuid < 11.1.1` — missing buffer bounds check in v3/v5/v6 when `buf` is
     provided (GHSA-w5hq-g745-h8pq, moderate), via
     `azurite → sequelize → @azure/ms-rest-js`.
-- **File references:** `package.json` (root, devDependencies: `azurite
-^3.36.0`), `package-lock.json`.
+- **File references:** the root `package.json` devDependency `azurite ^3.36.0`,
+  and `package-lock.json`.
 - **Exploitability:** Low in practice. None of these packages ship to
   consumers — the published packages (`@pegma/storage-core`,
   `@pegma/storage-azure-tables`, `@pegma/storage-cloudflare-d1`) declare only
@@ -78,11 +78,14 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
 
 - **Severity:** Low
 - **Evidence:** The Azure adapter caps a transaction at 100 actions before
-  touching the network (`packages/storage-azure-tables/src/index.ts:59`,
-  `:419-423`). The D1 adapter builds one prepared statement per guard/write
-  with no bound (`packages/storage-cloudflare-d1/src/index.ts:522-584`) — a
-  `putIfUnchanged` costs 3 statements, so ~34 port-level actions already
-  exceed D1's batch limits (100 statements / 1 MB SQL per batch).
+  touching the network (`packages/storage-azure-tables/src/index.ts:62`,
+  `:532-536`). The D1 adapter builds one prepared statement per guard/write
+  with no bound (`packages/storage-cloudflare-d1/src/index.ts:701-756`) — a
+  `putIfUnchanged` costs 3 statements, so an action list multiplies into a far
+  larger batch than the caller wrote. Corrected 2026-07-29: D1 publishes no
+  per-batch statement or SQL-size limit, as originally claimed here. The limit
+  that actually binds is per Worker invocation — 1000 queries on Workers Paid,
+  50 on Free — and every statement inside a batch counts against it.
 - **Exploitability:** Not attacker-reachable on its own; a host application
   would have to pass an oversized action list. The outcome is a thrown D1
   error, not corruption — D1 batches are atomic. It is a robustness/parity
@@ -92,18 +95,17 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
 - **Recommendation:** Add a documented cap in the D1 adapter (or in
   `assertOnePartition`) so the failure mode matches across adapters.
 - ✅ Resolved 2026-07-29 — the D1 adapter refuses more than 100 actions with a
-  `StorageError` before any statement is prepared or sent, matching the Azure
-  adapter's limit so one action list is accepted or refused by both. The
-  evidence above overstates the backend rule: D1 documents no batch statement
-  count, and the real budget is per Worker invocation (1000 queries on Workers
-  Paid, 50 on Free), against which each statement in a batch counts. That is
-  recorded in the adapter comment and the package README.
+  `StorageError` from the action count alone, before deriving keys, preparing
+  statements, or touching the database, matching the Azure adapter's limit so
+  one action list is accepted or refused by both. The query-budget correction
+  noted in the evidence is recorded in the adapter comment and the package
+  README.
 
 ### 4. D1 transaction rejection inferred by substring match on error text
 
 - **Severity:** Low
 - **Evidence:** `markerRejection`
-  (`packages/storage-cloudflare-d1/src/index.ts:268-281`) classifies a failed
+  (`packages/storage-cloudflare-d1/src/index.ts:373-391`) classifies a failed
   batch by checking whether `error.message` _includes_ marker strings such as
   `PEGMA_STORAGE_D1_TX_CHANGED`, then reports `committed: false` instead of
   rethrowing.

@@ -311,7 +311,7 @@ describe("D1 transaction guards", () => {
 });
 
 describe("D1 transaction limits", () => {
-  it("refuses more actions than one transaction may carry, before any I/O", async () => {
+  it("refuses more actions than one transaction may carry, before any work", async () => {
     let batches = 0;
     const database = wrappedDatabase(
       <T>(statements: CloudflareD1PreparedStatement[]) => {
@@ -319,6 +319,14 @@ describe("D1 transaction limits", () => {
         return env.DB.batch<T>(statements as D1PreparedStatement[]);
       },
     );
+    let keyCalls = 0;
+    const counted = {
+      ...widgets,
+      key: (value: Widget) => {
+        keyCalls += 1;
+        return widgets.key(value);
+      },
+    };
     const oversized = Array.from(
       { length: 101 },
       (_unused, index) =>
@@ -327,10 +335,11 @@ describe("D1 transaction limits", () => {
 
     await expect(
       createCloudflareD1Store({ database })
-        .collection(widgets)
+        .collection(counted)
         .transact("tools", oversized),
     ).rejects.toThrow(/at most 100 actions/);
     expect(batches).toBe(0);
+    expect(keyCalls).toBe(0);
     expect(
       await collection().get({ partition: "tools", id: "bulk-0" }),
     ).toBeNull();

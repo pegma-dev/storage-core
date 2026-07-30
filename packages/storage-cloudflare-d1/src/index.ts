@@ -682,17 +682,20 @@ export function createCloudflareD1Store(
         },
 
         async transact(partition, actions) {
-          const keys = actions.map((step) =>
-            step.action === "delete" ? step.key : definition.key(step.value),
-          );
-          assertOnePartition(name, partition, keys);
-
+          // Checked from the length alone, before the caller's key function
+          // runs over every action: an oversized list is refused either way,
+          // and there is no reason to derive keys for a batch that cannot be
+          // submitted.
           if (actions.length > MAX_TRANSACTION_ACTIONS) {
             throw new StorageError(
               `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
             );
           }
 
+          const keys = actions.map((step) =>
+            step.action === "delete" ? step.key : definition.key(step.value),
+          );
+          assertOnePartition(name, partition, keys);
           await ensureSchema();
 
           const statements: CloudflareD1PreparedStatement[] = [];
