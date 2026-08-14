@@ -91,14 +91,15 @@ function runNpm(arguments_, options = {}) {
   });
 }
 
-function unquoteYamlKey(key) {
-  if (
-    (key.startsWith("'") && key.endsWith("'")) ||
-    (key.startsWith('"') && key.endsWith('"'))
-  ) {
-    return key.slice(1, -1);
+function decodeYamlScalar(raw) {
+  const value = raw.trim();
+  if (value.length >= 2) {
+    const quote = value[0];
+    if ((quote === "'" || quote === '"') && value[value.length - 1] === quote) {
+      return value.slice(1, -1);
+    }
   }
-  return key;
+  return value;
 }
 
 /** Reads pnpm-lock.yaml importers without a YAML dependency. */
@@ -123,7 +124,7 @@ export function parsePnpmLockfileImporters(text) {
     }
     const importerMatch = /^ {2}(\S+):(?: \{\})?$/u.exec(line);
     if (importerMatch !== null) {
-      currentImporter = unquoteYamlKey(importerMatch[1]);
+      currentImporter = decodeYamlScalar(importerMatch[1]);
       importers[currentImporter] = {};
       currentSection = null;
       currentDep = null;
@@ -145,7 +146,7 @@ export function parsePnpmLockfileImporters(text) {
       currentImporter !== null &&
       currentSection !== null
     ) {
-      currentDep = unquoteYamlKey(depMatch[1]);
+      currentDep = decodeYamlScalar(depMatch[1]);
       importers[currentImporter][currentSection][currentDep] = {};
       continue;
     }
@@ -157,13 +158,106 @@ export function parsePnpmLockfileImporters(text) {
       currentDep !== null
     ) {
       importers[currentImporter][currentSection][currentDep][fieldMatch[1]] =
-        fieldMatch[2];
+        decodeYamlScalar(fieldMatch[2]);
     }
   }
   if (!inImporters) {
     fail("pnpm-lock.yaml is missing an importers section");
   }
   return importers;
+}
+
+function lockResolvedVersion(version) {
+  return /^(\S+?)(?:\(|$)/u.exec(version)?.[1];
+}
+
+function parseStableSemver(version) {
+  const match = STABLE_SEMVER.exec(version);
+  if (match === null) {
+    return null;
+  }
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+  };
+}
+
+function compareSemver(left, right) {
+  return (
+    left.major - right.major ||
+    left.minor - right.minor ||
+    left.patch - right.patch
+  );
+}
+
+export function lockVersionSatisfiesSpecifier(specifier, version) {
+  const resolved = lockResolvedVersion(version);
+  if (resolved === undefined || resolved.length === 0) {
+    return false;
+  }
+  if (resolved.startsWith("link:")) {
+    return true;
+  }
+  if (STABLE_SEMVER.test(specifier)) {
+    return resolved === specifier;
+  }
+  const parsed = parseStableSemver(resolved);
+  if (parsed === null) {
+    return false;
+  }
+  const caret = /^\^(\d+\.\d+\.\d+)$/u.exec(specifier);
+  if (caret !== null) {
+    const minimum = parseStableSemver(caret[1]);
+    if (minimum === null || compareSemver(parsed, minimum) < 0) {
+      return false;
+    }
+    if (minimum.major !== 0) {
+      return parsed.major === minimum.major;
+    }
+    if (minimum.minor !== 0) {
+      return parsed.major === 0 && parsed.minor === minimum.minor;
+    }
+    return compareSemver(parsed, minimum) === 0;
+  }
+  const tilde = /^~(\d+\.\d+\.\d+)$/u.exec(specifier);
+  if (tilde !== null) {
+    const minimum = parseStableSemver(tilde[1]);
+    return (
+      minimum !== null &&
+      parsed.major === minimum.major &&
+      parsed.minor === minimum.minor &&
+      compareSemver(parsed, minimum) >= 0
+    );
+  }
+  return true;
+}
+
+export function validateLockImporter(importer, manifest, location) {
+  for (const section of DEPENDENCY_SECTIONS) {
+    const declared = manifest[section] ?? {};
+    const locked = importer?.[section] ?? {};
+    const names = new Set([...Object.keys(declared), ...Object.keys(locked)]);
+    for (const name of names) {
+      const specifier = declared[name];
+      const entry = locked[name];
+      if (specifier === undefined) {
+        fail(
+          `${location} ${section}.${name} is not declared in the package manifest`,
+        );
+      }
+      if (
+        entry?.specifier !== specifier ||
+        typeof entry.version !== "string" ||
+        entry.version.length === 0 ||
+        !lockVersionSatisfiesSpecifier(specifier, entry.version)
+      ) {
+        fail(
+          `${location} ${section}.${name} must match its own specifier and resolved version`,
+        );
+      }
+    }
+  }
 }
 
 function gitCommand() {
@@ -253,6 +347,11 @@ async function validatePackage(root, definition, lockfile) {
   if (lockEntry === undefined || typeof lockEntry !== "object") {
     fail(`${definition.name} is not synchronized with pnpm-lock.yaml`);
   }
+  validateLockImporter(
+    lockEntry,
+    manifest,
+    `pnpm-lock.yaml importers[packages/${definition.directory}]`,
+  );
   for (const section of DEPENDENCY_SECTIONS) {
     for (const [name, version] of Object.entries(manifest[section] ?? {})) {
       if (!RELEASE_NAMES.has(name)) {

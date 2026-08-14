@@ -253,9 +253,11 @@ reads are incompatible with its optimistic version checks.
 
 ## Development
 
-Storage Core requires Node.js 22 or newer.
+Storage Core is developed on Node.js 22 and 24. Node 25+ does not bundle
+Corepack.
 
 ```sh
+npm install -g corepack
 corepack enable
 pnpm install
 pnpm run check

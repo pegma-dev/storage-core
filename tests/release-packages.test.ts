@@ -12,8 +12,10 @@ import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   decidePublication,
+  lockVersionSatisfiesSpecifier,
   parseArguments,
   parsePnpmLockfileImporters,
+  validateLockImporter,
   validateReleaseTag,
   validateRepository,
 } from "../scripts/release-packages.mjs";
@@ -138,6 +140,77 @@ packages:
       specifier: "0.4.0",
       version: "link:../storage-core",
     });
+    expect(
+      live["packages/storage-azure-tables"]?.dependencies?.[
+        "@azure/data-tables"
+      ],
+    ).toEqual({
+      specifier: "^13.3.1",
+      version: "13.3.2",
+    });
+  });
+
+  it("decodes quoted lockfile scalars before comparing pins", () => {
+    const importers = parsePnpmLockfileImporters(`importers:
+
+  packages/example:
+    dependencies:
+      'quoted':
+        specifier: '1'
+        version: "1.0.0"
+    peerDependencies:
+      peer:
+        specifier: '*'
+        version: 2.0.0
+`);
+    expect(importers["packages/example"]?.dependencies?.quoted).toEqual({
+      specifier: "1",
+      version: "1.0.0",
+    });
+    expect(importers["packages/example"]?.peerDependencies?.peer).toEqual({
+      specifier: "*",
+      version: "2.0.0",
+    });
+  });
+
+  it("accepts resolved versions that satisfy a range and exact pins exactly", () => {
+    expect(lockVersionSatisfiesSpecifier("^1.2.0", "1.2.3")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^13.3.1", "13.3.2")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "0.4.0")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "link:../storage-core")).toBe(
+      true,
+    );
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "0.4.1")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^1.2.0", "2.0.0")).toBe(false);
+  });
+
+  it("includes peerDependencies in lockfile pin checks", () => {
+    expect(() =>
+      validateLockImporter(
+        {
+          peerDependencies: {
+            vitest: { specifier: "^4.1.10", version: "4.1.10" },
+          },
+        },
+        { name: "@pegma/example", version: "0.0.0" },
+        "example",
+      ),
+    ).toThrow("peerDependencies.vitest is not declared");
+    expect(() =>
+      validateLockImporter(
+        {
+          peerDependencies: {
+            vitest: { specifier: "^4.1.10", version: "4.1.10" },
+          },
+        },
+        {
+          name: "@pegma/example",
+          version: "0.0.0",
+          peerDependencies: { vitest: "^4.1.10" },
+        },
+        "example",
+      ),
+    ).not.toThrow();
   });
 
   it("validates package manifests and the lockfile together", async () => {
