@@ -256,6 +256,7 @@ reads are incompatible with its optimistic version checks.
 Storage Core requires Node.js 22 or newer.
 
 ```sh
+corepack enable
 pnpm install
 pnpm run check
 pnpm test

@@ -101,27 +101,25 @@ function unquoteYamlKey(key) {
   return key;
 }
 
-function parsePnpmLockImporters(text) {
+/** Reads pnpm-lock.yaml importers without a YAML dependency. */
+export function parsePnpmLockfileImporters(text) {
   const importers = {};
-  const lines = text.split(/\r?\n/u);
-  let index = 0;
-  while (index < lines.length && lines[index] !== "importers:") {
-    index += 1;
-  }
-  if (index >= lines.length) {
-    fail("pnpm-lock.yaml is missing an importers section");
-  }
-  index += 1;
+  let inImporters = false;
   let currentImporter = null;
   let currentSection = null;
   let currentDep = null;
-  for (; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line === "" || line.startsWith("#")) {
+  for (const line of text.split(/\r?\n/u)) {
+    if (!inImporters) {
+      if (line === "importers:") {
+        inImporters = true;
+      }
       continue;
     }
-    if (!line.startsWith(" ")) {
+    if (line.length > 0 && !line.startsWith(" ") && line.endsWith(":")) {
       break;
+    }
+    if (line === "" || line.startsWith("#")) {
+      continue;
     }
     const importerMatch = /^ {2}(\S+):(?: \{\})?$/u.exec(line);
     if (importerMatch !== null) {
@@ -148,19 +146,22 @@ function parsePnpmLockImporters(text) {
       currentSection !== null
     ) {
       currentDep = unquoteYamlKey(depMatch[1]);
-      importers[currentImporter][currentSection][currentDep] = undefined;
+      importers[currentImporter][currentSection][currentDep] = {};
       continue;
     }
-    const specifierMatch = /^ {8}specifier: (.+)$/u.exec(line);
+    const fieldMatch = /^ {8}(specifier|version): (.+)$/u.exec(line);
     if (
-      specifierMatch !== null &&
+      fieldMatch !== null &&
       currentImporter !== null &&
       currentSection !== null &&
       currentDep !== null
     ) {
-      importers[currentImporter][currentSection][currentDep] =
-        specifierMatch[1];
+      importers[currentImporter][currentSection][currentDep][fieldMatch[1]] =
+        fieldMatch[2];
     }
+  }
+  if (!inImporters) {
+    fail("pnpm-lock.yaml is missing an importers section");
   }
   return importers;
 }
@@ -249,7 +250,7 @@ async function validatePackage(root, definition, lockfile) {
   await stat(join(packageDirectory, "LICENSE"));
 
   const lockEntry = lockfile[`packages/${definition.directory}`];
-  if (lockEntry === undefined) {
+  if (lockEntry === undefined || typeof lockEntry !== "object") {
     fail(`${definition.name} is not synchronized with pnpm-lock.yaml`);
   }
   for (const section of DEPENDENCY_SECTIONS) {
@@ -261,9 +262,12 @@ async function validatePackage(root, definition, lockfile) {
       const dependencyManifest = await readJson(
         join(root, "packages", dependency.directory, "package.json"),
       );
+      const lockDependency = lockEntry[section]?.[name];
       if (
         version !== dependencyManifest.version ||
-        lockEntry[section]?.[name] !== version
+        lockDependency?.specifier !== version ||
+        typeof lockDependency?.version !== "string" ||
+        !lockDependency.version.startsWith("link:")
       ) {
         fail(
           `${definition.name} must pin ${name} to its exact workspace version`,
@@ -371,7 +375,7 @@ export async function validateRepository(options = {}) {
   if (!sameJson(actualInventory, expectedInventory)) {
     fail("public workspace inventory does not match the reviewed release list");
   }
-  const lockfile = parsePnpmLockImporters(
+  const lockfile = parsePnpmLockfileImporters(
     await readFile(join(root, "pnpm-lock.yaml"), "utf8"),
   );
   const packages = [];

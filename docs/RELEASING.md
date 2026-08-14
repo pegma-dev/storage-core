@@ -78,10 +78,14 @@ replace the tag.
 
 The unprivileged preparation job verifies the tag signature, version,
 release-event commit, and `origin/main` ancestry; enables Corepack for the
-pinned pnpm and installs the reviewed npm version (needed for `npm pack` and
-trusted publishing) with caching disabled; runs the full gate; packs every
-public workspace exactly once; smoke-tests the tarballs; and records each
-tarball's SHA-1 and SHA-512 integrity.
+pinned pnpm, installs from `pnpm-lock.yaml`, and installs the reviewed npm
+version (needed for `npm pack` and trusted publishing) with caching disabled;
+runs the full gate; packs every public workspace exactly once; smoke-tests
+the tarballs; and records each tarball's SHA-1 and SHA-512 integrity.
+
+Already-published `v0.4.0` and `v0.4.1` are immutable npm-era tags. Checking
+those tags out still uses `package-lock.json` and `npm ci`. Do not rewrite
+them. Every later tag uses `pnpm-lock.yaml`.
 
 Only the `npm-publish` job receives `id-token: write`. It installs no
 dependencies, verifies the downloaded prepared artifact, and publishes

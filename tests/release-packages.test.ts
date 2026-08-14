@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -7,6 +13,7 @@ import {
   RELEASE_PACKAGES,
   decidePublication,
   parseArguments,
+  parsePnpmLockfileImporters,
   validateReleaseTag,
   validateRepository,
 } from "../scripts/release-packages.mjs";
@@ -56,6 +63,7 @@ describe("release package metadata", () => {
       name: string;
       version: string;
       dependencies?: Record<string, string>;
+      scripts?: { prepack?: string };
     }>;
 
     // The scan contract released all three at 0.4.0. D1 carries a patch of
@@ -68,6 +76,68 @@ describe("release package metadata", () => {
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
     }
+    for (const manifest of manifests) {
+      expect(manifest.scripts?.prepack).toBe("npm run build");
+    }
+  });
+
+  it("reads workspace inventory and link pins from pnpm-lock.yaml", () => {
+    expect(existsSync(join(process.cwd(), "pnpm-lock.yaml"))).toBe(true);
+    expect(existsSync(join(process.cwd(), "package-lock.json"))).toBe(false);
+
+    const importers = parsePnpmLockfileImporters(`importers:
+
+  .:
+    devDependencies:
+      prettier:
+        specifier: ^3.9.6
+        version: 3.9.6
+
+  packages/storage-core: {}
+
+  packages/storage-azure-tables:
+    dependencies:
+      '@pegma/storage-core':
+        specifier: 0.4.0
+        version: link:../storage-core
+
+packages:
+  prettier@3.9.6:
+    resolution: {integrity: sha512-example}
+`);
+    expect(Object.keys(importers)).toEqual([
+      ".",
+      "packages/storage-core",
+      "packages/storage-azure-tables",
+    ]);
+    expect(
+      importers["packages/storage-azure-tables"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+
+    const live = parsePnpmLockfileImporters(
+      readFileSync(join(process.cwd(), "pnpm-lock.yaml"), "utf8"),
+    );
+    expect(
+      live["packages/storage-azure-tables"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+    expect(
+      live["packages/storage-cloudflare-d1"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
   });
 
   it("validates package manifests and the lockfile together", async () => {
@@ -183,10 +253,13 @@ describe("release source authentication", () => {
     const prepare = jobs.slice(prepareStart, publishStart);
     const publish = jobs.slice(publishStart);
     expect(prepare).not.toContain("id-token: write");
+    expect(prepare).toContain("npm@11.18.0");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
     expect(publish).not.toContain("pnpm install");
+    expect(publish).not.toContain("corepack");
+    expect(publish).not.toContain("pnpm");
     expect(publish).toContain("scripts/release-packages.mjs publish");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
