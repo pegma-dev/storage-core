@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const REPOSITORY_URL = "git+https://github.com/pegma-dev/storage-core.git";
 const NODE_RANGE = ">=22";
-const REVIEWED_NPM_VERSION = "11.18.0";
+const REVIEWED_PNPM_VERSION = "10.34.5";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const DEPENDENCY_SECTIONS = [
   "dependencies",
@@ -83,14 +83,86 @@ function run(command, arguments_, options = {}) {
 }
 
 function runNpm(arguments_, options = {}) {
-  const npmExecPath = process.env.npm_execpath;
-  if (npmExecPath !== undefined) {
-    return run(process.execPath, [npmExecPath, ...arguments_], options);
-  }
+  // Always invoke npm itself. `pnpm run` sets npm_execpath to pnpm, and
+  // trusted publishing plus `npm pack --json` are npm-registry operations.
   return run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
     ...options,
     shell: process.platform === "win32",
   });
+}
+
+function unquoteYamlKey(key) {
+  if (
+    (key.startsWith("'") && key.endsWith("'")) ||
+    (key.startsWith('"') && key.endsWith('"'))
+  ) {
+    return key.slice(1, -1);
+  }
+  return key;
+}
+
+function parsePnpmLockImporters(text) {
+  const importers = {};
+  const lines = text.split(/\r?\n/u);
+  let index = 0;
+  while (index < lines.length && lines[index] !== "importers:") {
+    index += 1;
+  }
+  if (index >= lines.length) {
+    fail("pnpm-lock.yaml is missing an importers section");
+  }
+  index += 1;
+  let currentImporter = null;
+  let currentSection = null;
+  let currentDep = null;
+  for (; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line === "" || line.startsWith("#")) {
+      continue;
+    }
+    if (!line.startsWith(" ")) {
+      break;
+    }
+    const importerMatch = /^ {2}(\S+):(?: \{\})?$/u.exec(line);
+    if (importerMatch !== null) {
+      currentImporter = unquoteYamlKey(importerMatch[1]);
+      importers[currentImporter] = {};
+      currentSection = null;
+      currentDep = null;
+      continue;
+    }
+    const sectionMatch =
+      /^ {4}(dependencies|devDependencies|optionalDependencies|peerDependencies):$/u.exec(
+        line,
+      );
+    if (sectionMatch !== null && currentImporter !== null) {
+      currentSection = sectionMatch[1];
+      importers[currentImporter][currentSection] = {};
+      currentDep = null;
+      continue;
+    }
+    const depMatch = /^ {6}(\S+):$/u.exec(line);
+    if (
+      depMatch !== null &&
+      currentImporter !== null &&
+      currentSection !== null
+    ) {
+      currentDep = unquoteYamlKey(depMatch[1]);
+      importers[currentImporter][currentSection][currentDep] = undefined;
+      continue;
+    }
+    const specifierMatch = /^ {8}specifier: (.+)$/u.exec(line);
+    if (
+      specifierMatch !== null &&
+      currentImporter !== null &&
+      currentSection !== null &&
+      currentDep !== null
+    ) {
+      importers[currentImporter][currentSection][currentDep] =
+        specifierMatch[1];
+    }
+  }
+  return importers;
 }
 
 function gitCommand() {
@@ -176,11 +248,9 @@ async function validatePackage(root, definition, lockfile) {
   await stat(join(packageDirectory, "README.md"));
   await stat(join(packageDirectory, "LICENSE"));
 
-  const lockEntry = lockfile.packages?.[`packages/${definition.directory}`];
-  if (lockEntry?.version !== manifest.version) {
-    fail(
-      `${definition.name} version is not synchronized with package-lock.json`,
-    );
+  const lockEntry = lockfile[`packages/${definition.directory}`];
+  if (lockEntry === undefined) {
+    fail(`${definition.name} is not synchronized with pnpm-lock.yaml`);
   }
   for (const section of DEPENDENCY_SECTIONS) {
     for (const [name, version] of Object.entries(manifest[section] ?? {})) {
@@ -292,16 +362,18 @@ export async function validateRepository(options = {}) {
   const rootManifest = await readJson(join(root, "package.json"));
   if (
     rootManifest.private !== true ||
-    rootManifest.packageManager !== `npm@${REVIEWED_NPM_VERSION}`
+    rootManifest.packageManager !== `pnpm@${REVIEWED_PNPM_VERSION}`
   ) {
-    fail(`the private root must pin npm@${REVIEWED_NPM_VERSION}`);
+    fail(`the private root must pin pnpm@${REVIEWED_PNPM_VERSION}`);
   }
   const expectedInventory = RELEASE_PACKAGES.map(({ name }) => name).sort();
   const actualInventory = await publicWorkspaceInventory(root);
   if (!sameJson(actualInventory, expectedInventory)) {
     fail("public workspace inventory does not match the reviewed release list");
   }
-  const lockfile = await readJson(join(root, "package-lock.json"));
+  const lockfile = parsePnpmLockImporters(
+    await readFile(join(root, "pnpm-lock.yaml"), "utf8"),
+  );
   const packages = [];
   for (const definition of RELEASE_PACKAGES) {
     packages.push(await validatePackage(root, definition, lockfile));

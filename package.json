@@ -5,13 +5,10 @@
   "description": "Schema-agnostic persistence for Pegma components.",
   "license": "MIT",
   "type": "module",
-  "packageManager": "npm@11.18.0",
+  "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=22"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "scripts": {
     "build": "tsc -b",
     "check": "tsc -b --pretty false && tsc -p tsconfig.test.json --pretty false && tsc -p tsconfig.d1-test.json --pretty false && tsc -p tsconfig.d1-consumer.json --pretty false",
@@ -21,7 +18,7 @@
     "release:check": "node scripts/release-packages.mjs check",
     "release:pack": "node scripts/release-packages.mjs pack",
     "release:publish": "node scripts/release-packages.mjs publish",
-    "test": "npm run build && npm run test:node && npm run test:d1",
+    "test": "pnpm run build && pnpm run test:node && pnpm run test:d1",
     "test:node": "vitest run --config vitest.config.ts",
     "test:d1": "vitest run --config vitest.d1.config.ts"
   },
