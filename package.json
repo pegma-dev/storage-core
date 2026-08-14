@@ -25,6 +25,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.18.8",
     "@cloudflare/workers-types": "^5.20260727.1",
+    "@pegma/storage-cloudflare-d1": "workspace:0.4.1",
     "@types/node": "^26.1.1",
     "azurite": "^3.36.0",
     "prettier": "^3.9.6",

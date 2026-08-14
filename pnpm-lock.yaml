@@ -14,6 +14,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^5.20260727.1
         version: 5.20260727.1
+      '@pegma/storage-cloudflare-d1':
+        specifier: workspace:0.4.1
+        version: link:packages/storage-cloudflare-d1
       '@types/node':
         specifier: ^26.1.1
         version: 26.1.1
