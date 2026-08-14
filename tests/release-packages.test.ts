@@ -182,9 +182,42 @@ packages:
     );
     expect(lockVersionSatisfiesSpecifier("0.4.0", "0.4.1")).toBe(false);
     expect(lockVersionSatisfiesSpecifier("^1.2.0", "2.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0", "0.5.0")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0", "1.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0.0", "0.0.5")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0.0", "0.1.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0.0.3", "0.0.3")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0.0.3", "0.0.4")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0-rc.1")).toBe(
+      true,
+    );
+    expect(
+      lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0-rc.1(foo@1.0.0)"),
+    ).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("1.2.3", "1.2.3-rc.1")).toBe(false);
+    expect(
+      lockVersionSatisfiesSpecifier("1.2.3", "1.2.3-rc.1(foo@1.0.0)"),
+    ).toBe(false);
   });
 
-  it("includes peerDependencies in lockfile pin checks", () => {
+  it("does not require importer.peerDependencies, which pnpm does not record", () => {
+    expect(() =>
+      validateLockImporter(
+        {
+          dependencies: {
+            leftpad: { specifier: "1.0.0", version: "1.0.0" },
+          },
+        },
+        {
+          name: "@pegma/example",
+          version: "0.0.0",
+          dependencies: { leftpad: "1.0.0" },
+          peerDependencies: { vitest: "^4.1.10" },
+        },
+        "example",
+      ),
+    ).not.toThrow();
     expect(() =>
       validateLockImporter(
         {
@@ -195,22 +228,19 @@ packages:
         { name: "@pegma/example", version: "0.0.0" },
         "example",
       ),
-    ).toThrow("peerDependencies.vitest is not declared");
+    ).not.toThrow();
     expect(() =>
       validateLockImporter(
-        {
-          peerDependencies: {
-            vitest: { specifier: "^4.1.10", version: "4.1.10" },
-          },
-        },
+        {},
         {
           name: "@pegma/example",
           version: "0.0.0",
+          dependencies: { leftpad: "1.0.0" },
           peerDependencies: { vitest: "^4.1.10" },
         },
         "example",
       ),
-    ).not.toThrow();
+    ).toThrow("dependencies.leftpad");
   });
 
   it("validates package manifests and the lockfile together", async () => {

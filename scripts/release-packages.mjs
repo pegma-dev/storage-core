@@ -17,11 +17,16 @@ const REPOSITORY_URL = "git+https://github.com/pegma-dev/storage-core.git";
 const NODE_RANGE = ">=22";
 const REVIEWED_PNPM_VERSION = "10.34.5";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
-const DEPENDENCY_SECTIONS = [
+const EXACT_PIN =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u;
+const CARET_RANGE = /^\^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/u;
+const TILDE_RANGE = /^~(\d+\.\d+\.\d+)$/u;
+// pnpm importers record these three. peerDependencies stay on the
+// manifest; ProjectSnapshot does not write an importer.peerDependencies map.
+const IMPORTER_SECTIONS = [
   "dependencies",
   "devDependencies",
   "optionalDependencies",
-  "peerDependencies",
 ];
 
 export const RELEASE_PACKAGES = [
@@ -168,7 +173,14 @@ export function parsePnpmLockfileImporters(text) {
 }
 
 function lockResolvedVersion(version) {
-  return /^(\S+?)(?:\(|$)/u.exec(version)?.[1];
+  if (typeof version !== "string" || version.length === 0) {
+    return undefined;
+  }
+  if (version.startsWith("link:")) {
+    return version;
+  }
+  const peerSuffix = version.indexOf("(");
+  return peerSuffix === -1 ? version : version.slice(0, peerSuffix);
 }
 
 function parseStableSemver(version) {
@@ -191,6 +203,42 @@ function compareSemver(left, right) {
   );
 }
 
+function satisfiesCaret(specifier, parsed) {
+  const caret = CARET_RANGE.exec(specifier);
+  if (caret === null) {
+    return undefined;
+  }
+  const major = Number(caret[1]);
+  const hasMinor = caret[2] !== undefined;
+  const hasPatch = caret[3] !== undefined;
+  const minor = hasMinor ? Number(caret[2]) : 0;
+  const patch = hasPatch ? Number(caret[3]) : 0;
+  const minimum = { major, minor, patch };
+  if (compareSemver(parsed, minimum) < 0) {
+    return false;
+  }
+  if (!hasMinor) {
+    // ^1 := >=1.0.0 <2.0.0-0; ^0 := >=0.0.0 <1.0.0-0
+    return parsed.major === major;
+  }
+  if (!hasPatch) {
+    // ^1.2 := >=1.2.0 <2.0.0-0
+    // ^0.2 := >=0.2.0 <0.3.0-0
+    // ^0.0 := >=0.0.0 <0.1.0-0
+    return major === 0
+      ? parsed.major === 0 && parsed.minor === minor
+      : parsed.major === major;
+  }
+  if (major === 0 && minor === 0) {
+    // ^0.0.3 := >=0.0.3 <0.0.4-0 — not a tilde that allows 0.0.4
+    return compareSemver(parsed, minimum) === 0;
+  }
+  if (major === 0) {
+    return parsed.major === 0 && parsed.minor === minor;
+  }
+  return parsed.major === major;
+}
+
 export function lockVersionSatisfiesSpecifier(specifier, version) {
   const resolved = lockResolvedVersion(version);
   if (resolved === undefined || resolved.length === 0) {
@@ -199,28 +247,18 @@ export function lockVersionSatisfiesSpecifier(specifier, version) {
   if (resolved.startsWith("link:")) {
     return true;
   }
-  if (STABLE_SEMVER.test(specifier)) {
+  if (EXACT_PIN.test(specifier)) {
     return resolved === specifier;
   }
   const parsed = parseStableSemver(resolved);
   if (parsed === null) {
     return false;
   }
-  const caret = /^\^(\d+\.\d+\.\d+)$/u.exec(specifier);
-  if (caret !== null) {
-    const minimum = parseStableSemver(caret[1]);
-    if (minimum === null || compareSemver(parsed, minimum) < 0) {
-      return false;
-    }
-    if (minimum.major !== 0) {
-      return parsed.major === minimum.major;
-    }
-    if (minimum.minor !== 0) {
-      return parsed.major === 0 && parsed.minor === minimum.minor;
-    }
-    return compareSemver(parsed, minimum) === 0;
+  const caret = satisfiesCaret(specifier, parsed);
+  if (caret !== undefined) {
+    return caret;
   }
-  const tilde = /^~(\d+\.\d+\.\d+)$/u.exec(specifier);
+  const tilde = TILDE_RANGE.exec(specifier);
   if (tilde !== null) {
     const minimum = parseStableSemver(tilde[1]);
     return (
@@ -234,7 +272,7 @@ export function lockVersionSatisfiesSpecifier(specifier, version) {
 }
 
 export function validateLockImporter(importer, manifest, location) {
-  for (const section of DEPENDENCY_SECTIONS) {
+  for (const section of IMPORTER_SECTIONS) {
     const declared = manifest[section] ?? {};
     const locked = importer?.[section] ?? {};
     const names = new Set([...Object.keys(declared), ...Object.keys(locked)]);
@@ -352,7 +390,7 @@ async function validatePackage(root, definition, lockfile) {
     manifest,
     `pnpm-lock.yaml importers[packages/${definition.directory}]`,
   );
-  for (const section of DEPENDENCY_SECTIONS) {
+  for (const section of IMPORTER_SECTIONS) {
     for (const [name, version] of Object.entries(manifest[section] ?? {})) {
       if (!RELEASE_NAMES.has(name)) {
         continue;
@@ -372,6 +410,22 @@ async function validatePackage(root, definition, lockfile) {
           `${definition.name} must pin ${name} to its exact workspace version`,
         );
       }
+    }
+  }
+  for (const [name, version] of Object.entries(
+    manifest.peerDependencies ?? {},
+  )) {
+    if (!RELEASE_NAMES.has(name)) {
+      continue;
+    }
+    const dependency = RELEASE_PACKAGES.find((entry) => entry.name === name);
+    const dependencyManifest = await readJson(
+      join(root, "packages", dependency.directory, "package.json"),
+    );
+    if (version !== dependencyManifest.version) {
+      fail(
+        `${definition.name} must pin ${name} to its exact workspace version`,
+      );
     }
   }
   return { definition, manifest, packageDirectory };
