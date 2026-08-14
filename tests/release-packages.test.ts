@@ -1,12 +1,21 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   decidePublication,
+  lockVersionSatisfiesSpecifier,
   parseArguments,
+  parsePnpmLockfileImporters,
+  validateLockImporter,
   validateReleaseTag,
   validateRepository,
 } from "../scripts/release-packages.mjs";
@@ -56,6 +65,7 @@ describe("release package metadata", () => {
       name: string;
       version: string;
       dependencies?: Record<string, string>;
+      scripts?: { prepack?: string };
     }>;
 
     // The scan contract released all three at 0.4.0. D1 carries a patch of
@@ -68,6 +78,169 @@ describe("release package metadata", () => {
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
     }
+    for (const manifest of manifests) {
+      expect(manifest.scripts?.prepack).toBe("npm run build");
+    }
+  });
+
+  it("reads workspace inventory and link pins from pnpm-lock.yaml", () => {
+    expect(existsSync(join(process.cwd(), "pnpm-lock.yaml"))).toBe(true);
+    expect(existsSync(join(process.cwd(), "package-lock.json"))).toBe(false);
+
+    const importers = parsePnpmLockfileImporters(`importers:
+
+  .:
+    devDependencies:
+      prettier:
+        specifier: ^3.9.6
+        version: 3.9.6
+
+  packages/storage-core: {}
+
+  packages/storage-azure-tables:
+    dependencies:
+      '@pegma/storage-core':
+        specifier: 0.4.0
+        version: link:../storage-core
+
+packages:
+  prettier@3.9.6:
+    resolution: {integrity: sha512-example}
+`);
+    expect(Object.keys(importers)).toEqual([
+      ".",
+      "packages/storage-core",
+      "packages/storage-azure-tables",
+    ]);
+    expect(
+      importers["packages/storage-azure-tables"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+
+    const live = parsePnpmLockfileImporters(
+      readFileSync(join(process.cwd(), "pnpm-lock.yaml"), "utf8"),
+    );
+    expect(
+      live["packages/storage-azure-tables"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+    expect(
+      live["packages/storage-cloudflare-d1"]?.dependencies?.[
+        "@pegma/storage-core"
+      ],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+    expect(
+      live["packages/storage-azure-tables"]?.dependencies?.[
+        "@azure/data-tables"
+      ],
+    ).toEqual({
+      specifier: "^13.3.1",
+      version: "13.3.2",
+    });
+  });
+
+  it("decodes quoted lockfile scalars before comparing pins", () => {
+    const importers = parsePnpmLockfileImporters(`importers:
+
+  packages/example:
+    dependencies:
+      'quoted':
+        specifier: '1'
+        version: "1.0.0"
+    peerDependencies:
+      peer:
+        specifier: '*'
+        version: 2.0.0
+`);
+    expect(importers["packages/example"]?.dependencies?.quoted).toEqual({
+      specifier: "1",
+      version: "1.0.0",
+    });
+    expect(importers["packages/example"]?.peerDependencies?.peer).toEqual({
+      specifier: "*",
+      version: "2.0.0",
+    });
+  });
+
+  it("accepts resolved versions that satisfy a range and exact pins exactly", () => {
+    expect(lockVersionSatisfiesSpecifier("^1.2.0", "1.2.3")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^13.3.1", "13.3.2")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "0.4.0")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "link:../storage-core")).toBe(
+      true,
+    );
+    expect(lockVersionSatisfiesSpecifier("0.4.0", "0.4.1")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^1.2.0", "2.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0", "0.5.0")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0", "1.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0.0", "0.0.5")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0.0", "0.1.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("^0.0.3", "0.0.3")).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("^0.0.3", "0.0.4")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0-rc.1")).toBe(
+      true,
+    );
+    expect(
+      lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0-rc.1(foo@1.0.0)"),
+    ).toBe(true);
+    expect(lockVersionSatisfiesSpecifier("1.0.0-rc.1", "1.0.0")).toBe(false);
+    expect(lockVersionSatisfiesSpecifier("1.2.3", "1.2.3-rc.1")).toBe(false);
+    expect(
+      lockVersionSatisfiesSpecifier("1.2.3", "1.2.3-rc.1(foo@1.0.0)"),
+    ).toBe(false);
+  });
+
+  it("does not require importer.peerDependencies, which pnpm does not record", () => {
+    expect(() =>
+      validateLockImporter(
+        {
+          dependencies: {
+            leftpad: { specifier: "1.0.0", version: "1.0.0" },
+          },
+        },
+        {
+          name: "@pegma/example",
+          version: "0.0.0",
+          dependencies: { leftpad: "1.0.0" },
+          peerDependencies: { vitest: "^4.1.10" },
+        },
+        "example",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateLockImporter(
+        {
+          peerDependencies: {
+            vitest: { specifier: "^4.1.10", version: "4.1.10" },
+          },
+        },
+        { name: "@pegma/example", version: "0.0.0" },
+        "example",
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateLockImporter(
+        {},
+        {
+          name: "@pegma/example",
+          version: "0.0.0",
+          dependencies: { leftpad: "1.0.0" },
+          peerDependencies: { vitest: "^4.1.10" },
+        },
+        "example",
+      ),
+    ).toThrow("dependencies.leftpad");
   });
 
   it("validates package manifests and the lockfile together", async () => {
@@ -183,10 +356,14 @@ describe("release source authentication", () => {
     const prepare = jobs.slice(prepareStart, publishStart);
     const publish = jobs.slice(publishStart);
     expect(prepare).not.toContain("id-token: write");
+    expect(prepare).toContain("npm@11.18.0");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
-    expect(publish).toContain("npm run release:publish");
+    expect(publish).not.toContain("pnpm install");
+    expect(publish).not.toContain("corepack");
+    expect(publish).not.toContain("pnpm");
+    expect(publish).toContain("scripts/release-packages.mjs publish");
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
   });

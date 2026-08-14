@@ -66,7 +66,7 @@ renders blank without them. Each needs `prepack` running the build, or a stale
 ## Workflow
 
 Work on a `claude/*` branch and open a pull request. The gate is
-`npm run format:check`, `npm run check`, `npm test` — all three, on Node 22 and 24. `npm test` starts Azurite automatically.
+`pnpm run format:check`, `pnpm run check`, `pnpm test` — all three, on Node 22 and 24. `pnpm test` starts Azurite automatically.
 
 Publishing is trusted-publisher only; no tokens exist. A release starts from a
 protected signed annotated `vX.Y.Z` tag already on `origin/main`, followed by

@@ -38,6 +38,26 @@ export interface ValidationResult {
 
 export const RELEASE_PACKAGES: readonly ReleasePackageDefinition[];
 
+export function parsePnpmLockfileImporters(
+  text: string,
+): Record<
+  string,
+  Record<string, Record<string, { specifier?: string; version?: string }>>
+>;
+
+export function lockVersionSatisfiesSpecifier(
+  specifier: string,
+  version: string,
+): boolean;
+
+export function validateLockImporter(
+  importer:
+    | Record<string, Record<string, { specifier?: string; version?: string }>>
+    | undefined,
+  manifest: PublicPackageManifest,
+  location: string,
+): void;
+
 export function parseArguments(
   arguments_: readonly string[],
 ): ReleaseCommandOptions;

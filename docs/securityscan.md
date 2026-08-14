@@ -29,7 +29,7 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
     provided (GHSA-w5hq-g745-h8pq, moderate), via
     `azurite → sequelize → @azure/ms-rest-js`.
 - **File references:** the root `package.json` devDependency `azurite ^3.36.0`,
-  and `package-lock.json`.
+  and `pnpm-lock.yaml`.
 - **Exploitability:** Low in practice. None of these packages ship to
   consumers — the published packages (`@pegma/storage-core`,
   `@pegma/storage-azure-tables`, `@pegma/storage-cloudflare-d1`) declare only
