@@ -217,6 +217,7 @@ and what you decode is what the last writer decided.
 | `createMemoryStore`            | included; the reference implementation     |
 | `@pegma/storage-azure-tables`  | available; passes the same conformance run |
 | `@pegma/storage-cloudflare-d1` | available; passes the same conformance run |
+| `@pegma/storage-dynamodb`      | available; passes the same conformance run |
 
 The in-memory store is not only for tests. It enforces the same concurrency
 rules as a real backend, so an assembled application runs correctly before
@@ -236,6 +237,24 @@ Every collection shares one table, separated by a partition-key prefix of
 one per collection. Optimistic concurrency maps onto ETags, and the adapter is
 verified against Azurite by the same conformance cases the in-memory store
 runs.
+
+On AWS, pass a DynamoDB client the host already constructed:
+
+```ts
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { createDynamoDbStore } from "@pegma/storage-dynamodb";
+
+const store = createDynamoDbStore({
+  client: new DynamoDBClient({ region: "us-east-1" }),
+  tableName: "pegma",
+});
+```
+
+The DynamoDB adapter also keeps every collection in one table. The hash key
+is the collection name and the range key is `<partition>` plus a unit
+separator plus the record id. Optimistic concurrency maps onto a UUID version
+token issued on every write. The adapter is verified against Amazon DynamoDB
+Local by the same conformance cases.
 
 ## Development
 

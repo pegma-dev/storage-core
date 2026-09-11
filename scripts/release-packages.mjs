@@ -42,6 +42,10 @@ export const RELEASE_PACKAGES = [
     directory: "storage-cloudflare-d1",
     name: "@pegma/storage-cloudflare-d1",
   },
+  {
+    directory: "storage-dynamodb",
+    name: "@pegma/storage-dynamodb",
+  },
 ];
 
 const RELEASE_NAMES = new Set(RELEASE_PACKAGES.map(({ name }) => name));

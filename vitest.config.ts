@@ -5,10 +5,11 @@ export default defineConfig({
     include: [
       "packages/storage-core/src/**/*.test.ts",
       "packages/storage-azure-tables/src/**/*.test.ts",
+      "packages/storage-dynamodb/src/**/*.test.ts",
       "tests/**/*.test.ts",
     ],
     exclude: ["**/dist/**", "**/node_modules/**"],
-    globalSetup: ["./test/azurite.ts"],
+    globalSetup: ["./test/azurite.ts", "./test/dynamodb-local.ts"],
     testTimeout: 30_000,
   },
 });

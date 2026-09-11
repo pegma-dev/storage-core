@@ -217,6 +217,7 @@ and what you decode is what the last writer decided.
 | `createMemoryStore`            | included; the reference implementation     |
 | `@pegma/storage-azure-tables`  | available; passes the same conformance run |
 | `@pegma/storage-cloudflare-d1` | available; passes the same conformance run |
+| `@pegma/storage-dynamodb`      | available; passes the same conformance run |
 
 The in-memory store is not only for tests. It enforces the same concurrency
 rules as a real backend, so an assembled application runs correctly before
@@ -250,6 +251,25 @@ The D1 adapter also keeps every collection in one data table with the same
 D1 binding in Cloudflare's Workers Vitest pool. It deliberately uses direct
 binding calls, which stay on the primary database; D1 sessions and replicated
 reads are incompatible with its optimistic version checks.
+
+On AWS, pass a DynamoDB client the host already constructed:
+
+```ts
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { createDynamoDbStore } from "@pegma/storage-dynamodb";
+
+const store = createDynamoDbStore({
+  client: new DynamoDBClient({ region: "us-east-1" }),
+  tableName: "pegma",
+});
+```
+
+The DynamoDB adapter also keeps every collection in one table. The hash key
+is the collection name and the range key is `<partition>` plus a unit
+separator plus the record id, which is DynamoDB's native equivalent of the
+Azure `<collection>:<partition>` layout. Optimistic concurrency maps onto a
+UUID version token issued on every write. The adapter is verified against
+Amazon DynamoDB Local by the same conformance cases.
 
 ## Development
 

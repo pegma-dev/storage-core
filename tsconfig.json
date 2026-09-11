@@ -9,6 +9,9 @@
     },
     {
       "path": "./packages/storage-cloudflare-d1"
+    },
+    {
+      "path": "./packages/storage-dynamodb"
     }
   ]
 }

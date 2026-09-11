@@ -50,6 +50,7 @@ describe("release package metadata", () => {
       "@pegma/storage-core",
       "@pegma/storage-azure-tables",
       "@pegma/storage-cloudflare-d1",
+      "@pegma/storage-dynamodb",
     ]);
   });
 
@@ -68,12 +69,14 @@ describe("release package metadata", () => {
       scripts?: { prepack?: string };
     }>;
 
-    // The scan contract released all three at 0.4.0. D1 carries a patch of
-    // its own; the port it pins stays exactly where it was published.
+    // The scan contract released core, Azure, and D1 at 0.4.0. D1 carries
+    // a patch of its own; DynamoDB is the next unused repository-wide
+    // number. Every adapter pins the port exactly where it was published.
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
       { name: "@pegma/storage-cloudflare-d1", version: "0.4.1" },
+      { name: "@pegma/storage-dynamodb", version: "0.4.2" },
     ]);
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
@@ -141,12 +144,26 @@ packages:
       version: "link:../storage-core",
     });
     expect(
+      live["packages/storage-dynamodb"]?.dependencies?.["@pegma/storage-core"],
+    ).toEqual({
+      specifier: "0.4.0",
+      version: "link:../storage-core",
+    });
+    expect(
       live["packages/storage-azure-tables"]?.dependencies?.[
         "@azure/data-tables"
       ],
     ).toEqual({
       specifier: "^13.3.1",
       version: "13.3.2",
+    });
+    expect(
+      live["packages/storage-dynamodb"]?.dependencies?.[
+        "@aws-sdk/client-dynamodb"
+      ],
+    ).toEqual({
+      specifier: "^3.1097.0",
+      version: "3.1130.0",
     });
   });
 

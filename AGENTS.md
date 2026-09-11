@@ -77,9 +77,11 @@ dependency-ordered. See `docs/RELEASING.md`.
 
 ## Where things stand
 
-All three packages are published at `0.4.0`, and
-`@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness patch
-of its own. The port offers keyed access,
+All four packages are in this repository. `@pegma/storage-core` and
+`@pegma/storage-azure-tables` are published at `0.4.0`,
+`@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness
+patch of its own, and `@pegma/storage-dynamodb` is the AWS adapter at
+`0.4.2` (see `docs/AWS_ADAPTER.md`). The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.
