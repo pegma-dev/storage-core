@@ -3,7 +3,6 @@ import {
   CreateTableCommand,
   DeleteItemCommand,
   DescribeTableCommand,
-  DynamoDBClient,
   GetItemCommand,
   PutItemCommand,
   QueryCommand,
@@ -13,6 +12,7 @@ import {
   TransactWriteItemsCommand,
   type AttributeValue,
   type CancellationReason,
+  type DynamoDBClient,
   type QueryCommandOutput,
   type TransactWriteItem,
 } from "@aws-sdk/client-dynamodb";
@@ -84,6 +84,10 @@ export interface DynamoDbStoreOptions {
 
   /**
    * Create the table on first use if it is missing. Defaults to true.
+   *
+   * On Amazon DynamoDB a new table can take tens of seconds to become
+   * ACTIVE. The adapter waits with backoff (about a minute of sleeps)
+   * and then throws. DynamoDB Local becomes ACTIVE immediately.
    *
    * Set false when the table is provisioned by infrastructure and the
    * application's identity has no permission to create tables.
@@ -260,6 +264,11 @@ function wait(milliseconds: number): Promise<void> {
   });
 }
 
+/** Sleep budget while waiting for CreateTable to become ACTIVE. */
+const TABLE_ACTIVE_SLEEP_MS = 60_000;
+const TABLE_ACTIVE_INITIAL_DELAY_MS = 100;
+const TABLE_ACTIVE_MAX_DELAY_MS = 2_000;
+
 function cancellationReasons(error: unknown): CancellationReason[] | undefined {
   if (error instanceof TransactionCanceledException) {
     return error.CancellationReasons;
@@ -353,7 +362,9 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
   let tableReady: Promise<void> | undefined;
 
   async function waitUntilActive(): Promise<void> {
-    for (let attempt = 0; attempt < 40; attempt += 1) {
+    let delay = TABLE_ACTIVE_INITIAL_DELAY_MS;
+    let slept = 0;
+    while (true) {
       try {
         const described = await client.send(
           new DescribeTableCommand({ TableName: tableName }),
@@ -366,11 +377,15 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
           throw error;
         }
       }
-      await wait(50);
+      if (slept >= TABLE_ACTIVE_SLEEP_MS) {
+        throw new StorageError(
+          `DynamoDB table ${JSON.stringify(tableName)} did not become ACTIVE.`,
+        );
+      }
+      await wait(delay);
+      slept += delay;
+      delay = Math.min(delay * 2, TABLE_ACTIVE_MAX_DELAY_MS);
     }
-    throw new StorageError(
-      `DynamoDB table ${JSON.stringify(tableName)} did not become ACTIVE.`,
-    );
   }
 
   function ensureTable(): Promise<void> {
@@ -726,6 +741,11 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
           });
           return {
             records,
+            // Resume after the last *returned* logical key. Query's
+            // LastEvaluatedKey after the extra (limit+1) fetch would skip
+            // that extra item on the next page. Intra-page continuation
+            // already forwards LastEvaluatedKey. Reconstructing {pk, sk}
+            // matches DynamoDB's exclusive range-key start for this schema.
             nextCursor:
               collected.length > options.limit
                 ? encodeScanCursor(name, records[records.length - 1]!.key)

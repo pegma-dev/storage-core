@@ -31,7 +31,10 @@ Hand the resulting `Store` to any component that declares collections against
 backend is in use.
 
 The adapter creates the table on first use by default (`pk` hash, `sk`
-range, on-demand billing). To provision it with infrastructure instead, set
+range, on-demand billing). On Amazon DynamoDB that create can take tens of
+seconds before the table is ACTIVE; the adapter waits with backoff (about a
+minute of sleeps) and then throws. DynamoDB Local becomes ACTIVE immediately.
+To provision the table with infrastructure instead, set
 `createTableIfMissing: false` and create:
 
 ```
