@@ -1,11 +1,16 @@
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { defineCollection, type CollectionStore } from "@pegma/storage-core";
 import { conformanceCases } from "@pegma/storage-core/conformance";
 import { describe, expect, it } from "vitest";
 
-import { DYNAMODB_PORT } from "../../../test/dynamodb-local.js";
+import {
+  DYNAMODB_LOCAL_TARBALL_SHA256,
+  DYNAMODB_PORT,
+  dynamoDbLocalTarballPath,
+} from "../../../test/dynamodb-local.js";
 import { createDynamoDbStore } from "./index.js";
 
 const ENDPOINT = `http://127.0.0.1:${DYNAMODB_PORT}`;
@@ -76,6 +81,21 @@ describe("createDynamoDbStore", () => {
       await testCase.run(freshStoreFactory());
     });
   }
+});
+
+describe("DynamoDB Local pin", () => {
+  it("runs against the SHA-256 of the pinned official tarball", () => {
+    const tarball = dynamoDbLocalTarballPath();
+    if (!existsSync(tarball)) {
+      throw new Error(
+        `DynamoDB Local tarball missing at ${tarball}; the harness should have verified it before this suite.`,
+      );
+    }
+    const digest = createHash("sha256")
+      .update(readFileSync(tarball))
+      .digest("hex");
+    expect(digest).toBe(DYNAMODB_LOCAL_TARBALL_SHA256);
+  });
 });
 
 describe("DynamoDB table initialization", () => {

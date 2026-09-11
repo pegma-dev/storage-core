@@ -18,8 +18,9 @@
     "release:check": "node scripts/release-packages.mjs check",
     "release:pack": "node scripts/release-packages.mjs pack",
     "release:publish": "node scripts/release-packages.mjs publish",
-    "test": "pnpm run build && pnpm run test:node && pnpm run test:d1",
+    "test": "pnpm run build && pnpm run test:node && pnpm run test:dynamodb && pnpm run test:d1",
     "test:node": "vitest run --config vitest.config.ts",
+    "test:dynamodb": "vitest run --config vitest.dynamodb.config.ts",
     "test:d1": "vitest run --config vitest.d1.config.ts"
   },
   "devDependencies": {

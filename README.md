@@ -274,8 +274,9 @@ Amazon DynamoDB Local by the same conformance cases.
 ## Development
 
 Storage Core is developed on Node.js 22 and 24. Node 25+ does not bundle
-Corepack. `pnpm test` starts Azurite and Amazon DynamoDB Local; the latter
-needs a JDK on PATH (CI uses Temurin 21).
+Corepack. `pnpm test` starts Azurite for the Node suite and Amazon DynamoDB
+Local in a separate `test:dynamodb` run; the latter needs a JDK on PATH
+(CI uses Temurin 21).
 
 ```sh
 npm install -g corepack

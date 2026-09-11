@@ -64,7 +64,11 @@ cannot keep the port's promises must not ship.
 The conformance suite is the specification. This adapter is finished when
 every case passes against **real DynamoDB Local**. Mechanically that is the
 `test/azurite.ts` pattern: spawn the official engine (here, Amazon's
-DynamoDB Local jar), not a mocked `DynamoDBClient`. CI runs the suite on
+DynamoDB Local jar), not a mocked `DynamoDBClient`. The jar comes from the
+pinned `dynamodb_local_2025-04-14.tar.gz` tarball; its SHA-256 is the digest
+of that file. DynamoDB Local is a separate vitest run (`pnpm run test:dynamodb`)
+from the memory/Azure suites, so a download or pin failure does not take
+down the rest of the Node gate. CI still runs it as part of `pnpm test` on
 Node 22 + 24.
 
 ## Versioning and publish

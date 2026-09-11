@@ -16,6 +16,7 @@
     "test/azurite.ts",
     "test/dynamodb-local.ts",
     "vitest.config.ts",
+    "vitest.dynamodb.config.ts",
     "vitest.d1.config.ts"
   ]
 }

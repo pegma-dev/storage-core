@@ -24,15 +24,21 @@ const execFileAsync = promisify(execFile);
  *
  * The port is deliberately not DynamoDB Local's default, so a developer
  * already running it for something else does not collide with this. The
- * tarball is pinned by URL and SHA-256; the suite caches the verified
- * tarball in the process temp directory and extracts a fresh copy per run.
+ * tarball is pinned by URL and SHA-256 computed from that official Amazon
+ * archive (`dynamodb_local_2025-04-14.tar.gz`), not from a version
+ * nickname. setup() refuses to extract until the digest matches. The
+ * suite caches the verified tarball in the process temp directory and
+ * extracts a fresh copy per run. This harness is only the DynamoDB
+ * vitest run; a pin or download failure does not take down memory or
+ * Azure tests.
  */
 export const DYNAMODB_PORT = 10103;
 
 const TARBALL_NAME = "dynamodb_local_2025-04-14.tar.gz";
 const TARBALL_URL = `https://d1ni2b6xgvw0s0.cloudfront.net/v2.x/${TARBALL_NAME}`;
-const TARBALL_SHA256 =
+export const DYNAMODB_LOCAL_TARBALL_SHA256 =
   "9a8e6c1b1d4f5c1030c00a5a7eaee1a9ab2b8f1bbde7b700d5505898a3948fff";
+const TARBALL_SHA256 = DYNAMODB_LOCAL_TARBALL_SHA256;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 
@@ -67,6 +73,10 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
 
 function tarballCacheDirectory(): string {
   return join(tmpdir(), "pegma-dynamodb-local-2025-04-14");
+}
+
+export function dynamoDbLocalTarballPath(): string {
+  return join(tarballCacheDirectory(), TARBALL_NAME);
 }
 
 async function sha256File(path: string): Promise<string> {
@@ -167,12 +177,12 @@ async function assertJava(): Promise<void> {
 }
 
 export async function setup(): Promise<void> {
+  const tarball = await ensureVerifiedTarball();
   if (await portAccepting(DYNAMODB_PORT)) {
     return;
   }
 
   await assertJava();
-  const tarball = await ensureVerifiedTarball();
   distribution = await extractDistribution(tarball);
   child = spawn(
     "java",
