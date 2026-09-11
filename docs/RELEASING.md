@@ -43,6 +43,7 @@ The reviewed release order is:
 1. `@pegma/storage-core`
 2. `@pegma/storage-azure-tables`
 3. `@pegma/storage-cloudflare-d1`
+4. `@pegma/storage-dynamodb`
 
 This keeps the port ahead of adapters that depend on it. The release script
 also requires internal dependencies to be exact workspace-version pins.
@@ -67,6 +68,13 @@ messages its guard triggers raise. The port is unchanged, so
 `@pegma/storage-core` and `@pegma/storage-azure-tables` stay at `0.4.0` and
 must reproduce the integrity already on npm. `v0.4.1` therefore selects one
 package to publish, and D1 keeps its exact `0.4.0` pin on the port.
+
+### DynamoDB adapter
+
+`@pegma/storage-dynamodb` is the AWS record-store adapter. The port is
+unchanged, so core and Azure stay at `0.4.0` and D1 stays at `0.4.1`; a
+`v0.4.2` release selects this package. It pins `@pegma/storage-core`
+exactly at `0.4.0`. See `docs/AWS_ADAPTER.md`.
 
 ## Release procedure
 

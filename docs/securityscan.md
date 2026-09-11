@@ -32,8 +32,9 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
   and `pnpm-lock.yaml`.
 - **Exploitability:** Low in practice. None of these packages ship to
   consumers — the published packages (`@pegma/storage-core`,
-  `@pegma/storage-azure-tables`, `@pegma/storage-cloudflare-d1`) declare only
-  `@azure/data-tables` and the workspace port as runtime dependencies, and the
+  `@pegma/storage-azure-tables`, `@pegma/storage-cloudflare-d1`,
+  `@pegma/storage-dynamodb`) declare only their backend SDK and the workspace
+  port as runtime dependencies, and the
   release pipeline packs only `dist/` allowlists. The vulnerable code paths
   run only inside the local/CI test harness (Azurite emulator process), which
   processes no untrusted input: the only client is the adapter test suite

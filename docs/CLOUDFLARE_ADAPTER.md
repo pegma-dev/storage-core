@@ -17,7 +17,9 @@ one deliberate exception, and it exists for a reason other than breadth:
 environment** (see pegma-dev/pegma.dev, `docs/PROJECT_PLAN.md`, Phase 4),
 and its planned Workers consumer needs a Store. Two clouds, one conformance
 suite, is the portability claim made publicly on the site — this adapter is
-that claim, tested. It is not an invitation to a third adapter.
+that claim, tested. A later AWS adapter, `@pegma/storage-dynamodb`, is
+documented in `docs/AWS_ADAPTER.md`. That addition does not reopen Workers KV
+or other rejected backends.
 
 ## The backend decision
 

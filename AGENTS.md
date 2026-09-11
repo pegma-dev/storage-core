@@ -66,7 +66,7 @@ renders blank without them. Each needs `prepack` running the build, or a stale
 ## Workflow
 
 Work on a `claude/*` branch and open a pull request. The gate is
-`pnpm run format:check`, `pnpm run check`, `pnpm test` — all three, on Node 22 and 24. `pnpm test` starts Azurite automatically.
+`pnpm run format:check`, `pnpm run check`, `pnpm test` — all three, on Node 22 and 24. `pnpm test` starts Azurite automatically and runs Amazon DynamoDB Local in a separate vitest config (`test:dynamodb`). DynamoDB Local needs a JDK on PATH (CI uses Temurin 21).
 
 Publishing is trusted-publisher only; no tokens exist. A release starts from a
 protected signed annotated `vX.Y.Z` tag already on `origin/main`, followed by
@@ -77,9 +77,11 @@ dependency-ordered. See `docs/RELEASING.md`.
 
 ## Where things stand
 
-All three packages are published at `0.4.0`, and
-`@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness patch
-of its own. The port offers keyed access,
+All four packages are in this repository. `@pegma/storage-core` and
+`@pegma/storage-azure-tables` are published at `0.4.0`,
+`@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness
+patch of its own, and `@pegma/storage-dynamodb` is the AWS adapter at
+`0.4.2` (see `docs/AWS_ADAPTER.md`). The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.
