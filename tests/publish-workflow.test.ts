@@ -20,6 +20,14 @@ function workflowJob(name: string): string {
   return jobsSection.slice(start, end);
 }
 
+function workflowStep(job: string, name: string): string {
+  const marker = `      - name: ${name}\n`;
+  const start = job.indexOf(marker);
+  if (start === -1) throw new Error(`Workflow step ${name} was not found.`);
+  const end = job.indexOf("\n      - name:", start + marker.length);
+  return job.slice(start, end === -1 ? undefined : end);
+}
+
 describe("publish workflow", () => {
   it("verifies the tag before checkout and seals before smoke", () => {
     const prepare = workflowJob("prepare");
@@ -35,6 +43,9 @@ describe("publish workflow", () => {
     expect(prepare).toContain("include-hidden-files: false");
     expect(prepare).toContain("manifest-digest:");
     expect(prepare).toContain("artifact-digest:");
+    expect(workflowStep(prepare, "Verify the release tag")).toBe(
+      workflowStep(workflowJob("publish"), "Verify the release tag"),
+    );
   });
 
   it("pins the embedded publisher invariants", () => {
@@ -65,6 +76,7 @@ describe("publish workflow", () => {
     );
     expect(publish).toContain('upper.startsWith("GITHUB_")');
     expect(publish).toContain('upper.startsWith("ACTIONS_ID_TOKEN_")');
+    expect(publish).toContain("await chmod(configDirectory, 0o700)");
   });
 
   it("keeps smoke unprivileged and publish independent of a checkout", () => {

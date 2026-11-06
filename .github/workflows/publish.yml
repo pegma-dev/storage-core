@@ -401,6 +401,7 @@ jobs:
           }
 
           const configDirectory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "npm-config-"));
+          await chmod(configDirectory, 0o700);
           const userConfig = join(configDirectory, "userconfig");
           const globalConfig = join(configDirectory, "globalconfig");
           await writeFile(userConfig, "", { mode: 0o600 });

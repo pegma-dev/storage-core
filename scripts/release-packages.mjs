@@ -130,6 +130,7 @@ function runNpm(arguments_, options = {}) {
   // Always invoke npm itself. `pnpm run` sets npm_execpath to pnpm, and
   // trusted publishing plus `npm pack --json` are npm-registry operations.
   const configDirectory = mkdtempSync(join(tmpdir(), "pegma-npm-config-"));
+  chmodSync(configDirectory, 0o700);
   const userConfigPath = join(configDirectory, "userconfig");
   const globalConfigPath = join(configDirectory, "globalconfig");
   try {
@@ -538,7 +539,7 @@ export function validateReleaseTag(options = {}) {
   const expectedReleaseCommit =
     options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
   if (releaseTag === undefined || !RELEASE_TAG_PATTERN.test(releaseTag)) {
-    fail("a stable release tag is required");
+    fail("a stable vX.Y.Z release tag at v0.1.0 or later is required");
   }
   if (
     expectedReleaseCommit === undefined ||
@@ -640,7 +641,7 @@ export async function validateRepository(options = {}) {
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
   if (releaseTag !== undefined) {
     if (!RELEASE_TAG_PATTERN.test(releaseTag)) {
-      fail("release tag must be a stable vX.Y.Z tag");
+      fail("release tag must be a stable vX.Y.Z tag at v0.1.0 or later");
     }
     const version = releaseTag.slice(1);
     if (!packages.some(({ manifest }) => manifest.version === version)) {

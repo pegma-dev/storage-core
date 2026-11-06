@@ -4,6 +4,7 @@ import {
   ConcurrencyError,
   defineCollection,
   MAX_SCAN_PAGE_SIZE,
+  StorageError,
   type ScanRecord,
   type Store,
   type StoredRecord,
@@ -960,6 +961,24 @@ export const conformanceCases: readonly ConformanceCase[] = [
     }
     assert.equal(outcome.reason, "missing");
   }),
+
+  testCase(
+    "transact rejects more than 100 actions before inspecting them",
+    async (store) => {
+      const collection = store.collection(widgets);
+      const actions = Array.from({ length: 101 }, (_, index) => ({
+        action: "putIfUnchanged" as const,
+        value: widget({ id: `oversized-${String(index)}` }),
+        version: "*",
+      }));
+
+      await assert.rejects(collection.transact("tools", actions), (error) => {
+        assert.equal(error instanceof StorageError, true);
+        assert.match((error as Error).message, /at most 100 actions/);
+        return true;
+      });
+    },
+  ),
 
   testCase(
     "transact rejects an action outside its partition",

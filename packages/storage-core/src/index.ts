@@ -269,6 +269,7 @@ export interface CollectionStore<T> {
    * Every action must target `partition`, and no key may appear twice. Both
    * are rejected with a {@link StorageError} rather than being attempted,
    * because a backend would refuse them with a far less useful message.
+   * A transaction may carry at most 100 actions.
    *
    * A refused precondition is an outcome, not an error: the result names the
    * action that was refused and why, so a caller can turn it into whatever
@@ -342,6 +343,8 @@ interface StoredRow {
   readonly record: StoredRecord;
   readonly version: bigint;
 }
+
+const MAX_TRANSACTION_ACTIONS = 100;
 
 function assertVersionToken(version: unknown): asserts version is string {
   if (
@@ -726,6 +729,12 @@ export function createMemoryStore(): Store {
         },
 
         async transact(partition, actions) {
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
+            );
+          }
+
           for (const step of actions) {
             if (step.action === "putIfUnchanged") {
               assertVersionToken(step.version);

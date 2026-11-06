@@ -541,6 +541,12 @@ export function createAzureTablesStore(
         },
 
         async transact(partition, actions) {
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
+            );
+          }
+
           for (const step of actions) {
             if (step.action === "putIfUnchanged") {
               assertVersionToken(step.version);
@@ -550,12 +556,6 @@ export function createAzureTablesStore(
             step.action === "delete" ? step.key : definition.key(step.value),
           );
           assertOnePartition(name, partition, keys);
-
-          if (actions.length > MAX_TRANSACTION_ACTIONS) {
-            throw new StorageError(
-              `Azure Table Storage accepts at most ${MAX_TRANSACTION_ACTIONS} actions in one transaction, and this one has ${actions.length}.`,
-            );
-          }
 
           await ensureTable();
 

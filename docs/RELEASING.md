@@ -28,7 +28,7 @@ The repository has independent package versions. A `vX.Y.Z` release publishes
 only public workspaces whose manifest version is `X.Y.Z`. Every other
 workspace is packed too and must reproduce the exact integrity already on npm;
 this prevents an unversioned package change from hiding in another package's
-release.
+release. Release tags begin at `v0.1.0`; `v0.0.x` tags are not accepted.
 
 Release version numbers are nevertheless allocated repository-wide because
 Git tags share one namespace. Before changing a package version, choose a
