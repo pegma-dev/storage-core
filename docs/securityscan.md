@@ -143,8 +143,9 @@ Scan complete 2026-07-28. The following were examined and found clean:
   source.
 - **Key-space isolation.** Both adapters compose the physical partition key
   as `<collection>:<partition>` and both forbid `:` in collection names
-  (Azure `:207-211`, D1 `:341-345`), so two `(collection, partition)` pairs
-  cannot collide onto one physical partition.
+  (`packages/storage-azure-tables/src/index.ts` and
+  `packages/storage-cloudflare-d1/src/index.ts`), so two
+  `(collection, partition)` pairs cannot collide onto one physical partition.
 - **Reserved-property shadowing.** The Azure adapter rejects record fields
   named `partitionkey`/`rowkey`/`timestamp`/`etag` case-insensitively and
   spreads the record before the keys so the keys win regardless
@@ -152,20 +153,20 @@ Scan complete 2026-07-28. The following were examined and found clean:
 - **Concurrency integrity.** Conditional writes/deletes map to ETags (Azure)
   or version columns checked in the same statement (D1); `transact` rejects
   cross-partition and duplicate-key batches before any I/O
-  (`packages/storage-core/src/index.ts:298-322`). Tombstone handling in D1
-  prevents version reuse after delete.
+  (`assertOnePartition` in `packages/storage-core/src/index.ts`). Tombstone
+  handling in D1 prevents version reuse after delete.
 - **Command execution.** `scripts/release-packages.mjs` and
   `test/azurite.ts` spawn only fixed executables (`git`, `npm`, `node`) with
   argument arrays; `shell: true` is used solely for the Windows `npm.cmd`
   fallback, and tarball paths are passed through `basename` before use.
   `verifyPreparedManifest` validates tarball paths stay beside the manifest
-  before reading them (`scripts/release-packages.mjs:588-592`).
+  before reading them (`scripts/release-packages.mjs`).
 - **CI/CD.** All GitHub Actions are pinned to full-length SHAs; workflows use
   minimal `permissions:`; no `pull_request_target`; publishing is OIDC
   trusted-publisher only, requires a signed annotated tag verified against an
   allowed-signers file, an exact commit match, and registry integrity
   comparison before and after publish
-  (`.github/workflows/publish.yml`, `scripts/release-packages.mjs:639-682`).
+  (`.github/workflows/publish.yml`, `scripts/release-packages.mjs`).
 - **Secrets.** No credentials in tracked files beyond the documented Azurite
   emulator defaults (finding 2). `.gitignore` excludes `.env*` and
   `.release/`; `git ls-files` confirms no release artifacts or env files are

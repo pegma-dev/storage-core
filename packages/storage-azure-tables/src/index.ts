@@ -61,6 +61,18 @@ function isStatus(error: unknown, code: number): boolean {
 /** Azure refuses an entity-group transaction larger than this. */
 const MAX_TRANSACTION_ACTIONS = 100;
 
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
 interface AzureScanCursor {
   readonly collection: string;
   readonly continuation: string;
@@ -163,6 +175,9 @@ function encode(record: StoredRecord): Record<string, StoredValue> {
       throw new StorageError(
         `A record may not define the property ${JSON.stringify(name)}; that name belongs to the table.`,
       );
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("Stored record numbers must be finite.");
     }
     // Null is written by omission. Because every write replaces the whole
     // entity, an omitted property is an absent one, which is what clearing
@@ -351,7 +366,10 @@ export function createAzureTablesStore(
           const key = definition.key(value);
           try {
             await client.createEntity(entityFor(key, value));
-            return { inserted: true, value: codec.decode(codec.encode(value)) };
+            return {
+              inserted: true,
+              value: codec.decode(structuredClone(codec.encode(value))),
+            };
           } catch (error) {
             if (!isStatus(error, 409)) {
               throw error;
@@ -377,6 +395,7 @@ export function createAzureTablesStore(
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           await ensureTable();
           const key = definition.key(value);
           try {
@@ -418,7 +437,9 @@ export function createAzureTablesStore(
               }
               return {
                 written: true,
-                value: codec.decode(codec.encode(decision.value)),
+                value: codec.decode(
+                  structuredClone(codec.encode(decision.value)),
+                ),
                 attempts: attempt,
               };
             } catch (error) {
@@ -504,6 +525,7 @@ export function createAzureTablesStore(
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           await ensureTable();
           try {
             await client.deleteEntity(
@@ -524,16 +546,21 @@ export function createAzureTablesStore(
         },
 
         async transact(partition, actions) {
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
+            );
+          }
+
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
+          }
           const keys = actions.map((step) =>
             step.action === "delete" ? step.key : definition.key(step.value),
           );
           assertOnePartition(name, partition, keys);
-
-          if (actions.length > MAX_TRANSACTION_ACTIONS) {
-            throw new StorageError(
-              `Azure Table Storage accepts at most ${MAX_TRANSACTION_ACTIONS} actions in one transaction, and this one has ${actions.length}.`,
-            );
-          }
 
           await ensureTable();
 

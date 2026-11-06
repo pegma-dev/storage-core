@@ -28,7 +28,7 @@ The repository has independent package versions. A `vX.Y.Z` release publishes
 only public workspaces whose manifest version is `X.Y.Z`. Every other
 workspace is packed too and must reproduce the exact integrity already on npm;
 this prevents an unversioned package change from hiding in another package's
-release.
+release. Release tags begin at `v0.1.0`; `v0.0.x` tags are not accepted.
 
 Release version numbers are nevertheless allocated repository-wide because
 Git tags share one namespace. Before changing a package version, choose a
@@ -84,20 +84,34 @@ the exact `origin/main` commit, push and verify that tag, and only then create
 the GitHub release with `--verify-tag`. Never let GitHub create, move, or
 replace the tag.
 
-The unprivileged preparation job verifies the tag signature, version,
-release-event commit, and `origin/main` ancestry; enables Corepack for the
-pinned pnpm, installs from `pnpm-lock.yaml`, and installs the reviewed npm
-version (needed for `npm pack` and trusted publishing) with caching disabled;
-runs the full gate; packs every public workspace exactly once; smoke-tests
-the tarballs; and records each tarball's SHA-1 and SHA-512 integrity.
+Before checkout, the unprivileged preparation job verifies the stable release
+event, tag format, tag signature, exact release-event commit, and
+`origin/main` ancestry in a temporary bare repository. It then checks out that
+commit without persisted credentials, verifies the bundled npm 11.18.0,
+enables Corepack for the pinned pnpm, installs from `pnpm-lock.yaml`, runs the
+full gate, removes prior build output, and packs every public workspace exactly
+once. The sealed inventory contains only the package manifest and four
+tarballs, with the npm SHA-1 shasum plus SHA-256 and SHA-512 digests, and is
+uploaded before consumer installation begins.
+
+A separate unprivileged smoke job downloads a copy, verifies the package
+manifest digest, and installs the prepared tarballs into an isolated consumer
+directory with lifecycle scripts disabled. Locally, `pnpm release:pack`
+retains this smoke check by default; `--skip-smoke` produces the sealed files
+for a later `node scripts/release-packages.mjs smoke --manifest <path>` run.
 
 Already-published `v0.4.0` and `v0.4.1` are immutable npm-era tags. Checking
 those tags out still uses `package-lock.json` and `npm ci`. Do not rewrite
 them. Every later tag uses `pnpm-lock.yaml`.
 
-Only the `npm-publish` job receives `id-token: write`. It installs no
-dependencies, verifies the downloaded prepared artifact, and publishes
-release candidates in the dependency-first order above with npm provenance.
+Only the `npm-publish` job receives `id-token: write`. It checks out no
+repository code and runs no release-tag scripts. Workflow-owned verification
+rechecks the tag in a temporary bare repository, validates the downloaded
+inventory and package manifest digest, and publishes verified absolute
+tarball paths in the dependency-first order above with npm provenance.
+Registry reads and publishes use empty private npm configuration files, a
+small environment allowlist, disabled lifecycle scripts, and a fresh working
+directory for each publish.
 
 ## Partial-publish recovery
 

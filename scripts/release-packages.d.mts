@@ -16,6 +16,7 @@ export interface ValidationOptions {
 export interface ReleaseCommandOptions extends ValidationOptions {
   readonly manifest?: string;
   readonly output?: string;
+  readonly skipSmoke?: boolean;
 }
 
 export interface PublicPackageManifest {
@@ -80,6 +81,21 @@ export function decidePublication(
 export function prepareRelease(
   options?: ReleaseCommandOptions,
 ): Promise<{ manifestPath: string; manifest: unknown }>;
+
+export function verifyReleaseInventory(
+  manifestPath: string,
+  suppliedManifest?: unknown,
+): Promise<unknown>;
+
+export function smokePreparedRelease(
+  options?: ReleaseCommandOptions,
+): Promise<void>;
+
+export function isolatedNpmEnvironment(
+  source: NodeJS.ProcessEnv,
+  userConfigPath: string,
+  globalConfigPath: string,
+): NodeJS.ProcessEnv;
 
 export function publishPreparedRelease(
   options?: ReleaseCommandOptions,

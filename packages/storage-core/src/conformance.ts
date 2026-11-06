@@ -4,8 +4,10 @@ import {
   ConcurrencyError,
   defineCollection,
   MAX_SCAN_PAGE_SIZE,
+  StorageError,
   type ScanRecord,
   type Store,
+  type StoredRecord,
 } from "./index.js";
 
 /**
@@ -83,6 +85,21 @@ const decodedKeysDiffer = defineCollection<Widget>({
   },
 });
 
+interface MutableWidget {
+  group: string;
+  id: string;
+  label: string;
+}
+
+const mutableWidgets = defineCollection<MutableWidget>({
+  name: "pegma_conformance_mutable_widgets",
+  key: (value) => ({ partition: value.group, id: value.id }),
+  codec: {
+    encode: (value) => value as unknown as StoredRecord,
+    decode: (record) => record as unknown as MutableWidget,
+  },
+});
+
 function widget(overrides: Partial<Widget> = {}): Widget {
   return {
     group: "tools",
@@ -138,12 +155,65 @@ export const conformanceCases: readonly ConformanceCase[] = [
     assert.equal(stored?.retiredAt, null);
   }),
 
+  testCase(
+    "stored values are isolated from codec object identity",
+    async (store) => {
+      const collection = store.collection(mutableWidgets);
+      const input: MutableWidget = {
+        group: "tools",
+        id: "hammer",
+        label: "stored",
+      };
+      await collection.put(input);
+      input.label = "changed input";
+
+      const first = await collection.getVersioned({
+        partition: "tools",
+        id: "hammer",
+      });
+      assert.notEqual(first, null);
+      assert.equal(first?.value.label, "stored");
+      first!.value.label = "changed result";
+
+      const second = await collection.getVersioned({
+        partition: "tools",
+        id: "hammer",
+      });
+      assert.equal(second?.value.label, "stored");
+      assert.equal(second?.version, first?.version);
+    },
+  ),
+
+  testCase("writes reject non-finite stored numbers", async (store) => {
+    const collection = store.collection(widgets);
+    for (const [index, count] of [NaN, Infinity, -Infinity].entries()) {
+      const value = widget({ id: `non-finite-${String(index)}`, count });
+      await assert.rejects(collection.put(value), /finite/);
+      assert.equal(await collection.get(widgets.key(value)), null);
+    }
+  }),
+
   testCase("insertIfAbsent reports the record it created", async (store) => {
     const collection = store.collection(widgets);
     const result = await collection.insertIfAbsent(widget({ label: "Fresh" }));
 
     assert.equal(result.inserted, true);
     assert.equal(result.value.label, "Fresh");
+  }),
+
+  testCase("insertIfAbsent returns an isolated value", async (store) => {
+    const collection = store.collection(mutableWidgets);
+    const input: MutableWidget = {
+      group: "tools",
+      id: "hammer",
+      label: "stored",
+    };
+    const result = await collection.insertIfAbsent(input);
+    input.label = "changed input";
+    result.value.label = "changed result";
+
+    const stored = await collection.get({ partition: "tools", id: "hammer" });
+    assert.equal(stored?.label, "stored");
   }),
 
   testCase(
@@ -759,6 +829,58 @@ export const conformanceCases: readonly ConformanceCase[] = [
     );
   }),
 
+  testCase(
+    "conditional writes reject reserved version tokens",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ count: 1 }));
+      const put = collection.putIfUnchanged as unknown as (
+        value: Widget,
+        version: unknown,
+      ) => Promise<boolean>;
+      const remove = collection.deleteIfUnchanged as unknown as (
+        key: ReturnType<typeof widgets.key>,
+        version: unknown,
+      ) => Promise<boolean>;
+
+      for (const version of [null, undefined, "", " ", "*", " * "]) {
+        await assert.rejects(put(widget({ count: 2 }), version), TypeError);
+        await assert.rejects(remove(widgets.key(widget()), version), TypeError);
+      }
+      assert.equal((await collection.get(widgets.key(widget())))?.count, 1);
+    },
+  ),
+
+  testCase(
+    "a transaction rejects a reserved version before applying siblings",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await collection.put(widget({ id: "hammer", count: 1 }));
+      for (const version of [null, undefined, "", " ", "*", " * "]) {
+        const invalidActions = [
+          { action: "put", value: widget({ id: "wrench", count: 9 }) },
+          {
+            action: "putIfUnchanged",
+            value: widget({ id: "hammer", count: 2 }),
+            version,
+          },
+        ] as unknown as Parameters<typeof collection.transact>[1];
+        await assert.rejects(
+          collection.transact("tools", invalidActions),
+          TypeError,
+        );
+      }
+      assert.equal(
+        await collection.get({ partition: "tools", id: "wrench" }),
+        null,
+      );
+      assert.equal(
+        (await collection.get({ partition: "tools", id: "hammer" }))?.count,
+        1,
+      );
+    },
+  ),
+
   testCase("transact applies every action", async (store) => {
     const collection = store.collection(widgets);
     await collection.put(widget({ id: "doomed" }));
@@ -856,6 +978,24 @@ export const conformanceCases: readonly ConformanceCase[] = [
   }),
 
   testCase(
+    "transact rejects more than 100 actions before inspecting them",
+    async (store) => {
+      const collection = store.collection(widgets);
+      const actions = Array.from({ length: 101 }, (_, index) => ({
+        action: "putIfUnchanged" as const,
+        value: widget({ id: `oversized-${String(index)}` }),
+        version: "*",
+      }));
+
+      await assert.rejects(collection.transact("tools", actions), (error) => {
+        assert.equal(error instanceof StorageError, true);
+        assert.match((error as Error).message, /at most 100 actions/);
+        return true;
+      });
+    },
+  ),
+
+  testCase(
     "transact rejects an action outside its partition",
     async (store) => {
       const collection = store.collection(widgets);
@@ -864,6 +1004,32 @@ export const conformanceCases: readonly ConformanceCase[] = [
           { action: "put", value: widget({ group: "toys", id: "ball" }) },
         ]),
         /may only touch partition/,
+      );
+    },
+  ),
+
+  testCase(
+    "transact validates every record before applying writes",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await assert.rejects(
+        collection.transact("tools", [
+          { action: "put", value: widget({ id: "first" }) },
+          {
+            action: "put",
+            value: widget({ id: "second", count: Number.NaN }),
+          },
+        ]),
+        /finite/,
+      );
+
+      assert.equal(
+        await collection.get({ partition: "tools", id: "first" }),
+        null,
+      );
+      assert.equal(
+        await collection.get({ partition: "tools", id: "second" }),
+        null,
       );
     },
   ),

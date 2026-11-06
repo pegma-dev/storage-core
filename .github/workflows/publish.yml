@@ -17,32 +17,70 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    outputs:
+      manifest-digest: ${{ steps.seal.outputs.manifest_digest }}
+      artifact-digest: ${{ steps.upload.outputs['artifact-digest'] }}
     env:
+      CI: "1"
       RELEASE_TAG: ${{ github.event.release.tag_name }}
       RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
       RELEASE_COMMIT: ${{ github.sha }}
       RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
+      REVIEWED_NPM_VERSION: "11.18.0"
 
     steps:
-      - name: Check out the release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
-          fetch-depth: 0
-
-      - name: Fetch the protected release branch
-        run: git fetch --no-tags origin main:refs/remotes/origin/main
-
-      - name: Configure approved release signers
+      - name: Verify the release tag
         shell: bash
         run: |
+          set -euo pipefail
+          if [[ "${RELEASE_PRERELEASE}" != "false" ]]; then
+            echo "::error::Only stable releases may publish packages"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the supported stable format"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Release commit must be a full commit SHA"
+            exit 1
+          fi
           if [[ -z "${RELEASE_ALLOWED_SIGNERS}" ]]; then
             echo "::error::RELEASE_ALLOWED_SIGNERS must contain the reviewed SSH allowed-signers entries"
             exit 1
           fi
+          verify_directory="$(mktemp -d "${RUNNER_TEMP}/release-tag.XXXXXX")"
+          trap 'rm -rf "${verify_directory}"' EXIT
           allowed_signers="${RUNNER_TEMP}/release-allowed-signers"
           umask 077
           printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
+          chmod 0600 "${allowed_signers}"
+          git init --bare "${verify_directory}"
+          git -C "${verify_directory}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -C "${verify_directory}" config gpg.format ssh
+          git -C "${verify_directory}" config gpg.ssh.allowedSignersFile "${allowed_signers}"
+          git -C "${verify_directory}" fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          [[ "$(git -C "${verify_directory}" cat-file -t "refs/tags/${RELEASE_TAG}")" == "tag" ]]
+          git -C "${verify_directory}" verify-tag "refs/tags/${RELEASE_TAG}"
+          [[ "$(git -C "${verify_directory}" rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${RELEASE_COMMIT}" ]]
+          git -C "${verify_directory}" merge-base --is-ancestor \
+            "${RELEASE_COMMIT}" refs/remotes/origin/main
+
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Configure checkout tag verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed_signers="${RUNNER_TEMP}/release-allowed-signers"
+          [[ -f "${allowed_signers}" ]]
           git config --local gpg.format ssh
           git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
 
@@ -50,8 +88,13 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.18.0
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Check the npm version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(npm --version)" == "${REVIEWED_NPM_VERSION}" ]]
 
       - name: Set up Java for DynamoDB Local
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
@@ -61,9 +104,6 @@ jobs:
 
       - name: Enable Corepack
         run: corepack enable
-
-      - name: Use the reviewed npm release
-        run: npm install --global npm@11.18.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -77,8 +117,19 @@ jobs:
       - name: Run tests
         run: pnpm test
 
-      - name: Prepare and verify release tarballs
-        run: pnpm run release:pack -- --require-clean --require-main-ancestor --require-release-tag --expected-release-commit "${RELEASE_COMMIT}" --output .release
+      - name: Pack the release files
+        run: >-
+          pnpm run release:pack -- --require-clean --require-main-ancestor
+          --require-release-tag --skip-smoke
+          --expected-release-commit "${RELEASE_COMMIT}" --output .release
+
+      - name: Seal the release inventory
+        id: seal
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest_digest="$(sha256sum .release/package-manifest.json | cut -d' ' -f1)"
+          echo "manifest_digest=${manifest_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload the prepared release
         id: upload
@@ -87,43 +138,368 @@ jobs:
           name: storage-release-${{ github.run_id }}
           path: .release/
           if-no-files-found: error
-          include-hidden-files: true
+          include-hidden-files: false
           overwrite: true
           retention-days: 30
 
       - name: Record the prepared artifact digest
-        run: echo "Prepared artifact SHA-256 ${{ steps.upload.outputs.artifact-digest }}" >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
+        run: echo "Prepared artifact SHA-256 ${ARTIFACT_DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
+
+  smoke:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CI: "1"
+      RELEASE_COMMIT: ${{ github.sha }}
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs['manifest-digest'] }}
+      RELEASE_DIRECTORY: ${{ github.workspace }}/storage-release
+
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+
+      - name: Download the prepared release copy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: storage-release-${{ github.run_id }}
+          path: ${{ github.workspace }}/storage-release
+
+      - name: Verify the prepared manifest digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${EXPECTED_MANIFEST_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+          actual="$(sha256sum "${RELEASE_DIRECTORY}/package-manifest.json" | cut -d' ' -f1)"
+          [[ "${actual}" == "${EXPECTED_MANIFEST_DIGEST}" ]]
+
+      - name: Smoke-test the prepared release copy
+        run: >-
+          node scripts/release-packages.mjs smoke
+          --expected-release-commit "${RELEASE_COMMIT}"
+          --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
 
   publish:
-    needs: prepare
+    needs: [prepare, smoke]
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
       contents: read
       id-token: write
     env:
+      CI: "1"
       RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
       RELEASE_COMMIT: ${{ github.sha }}
+      RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
+      REVIEWED_NPM_VERSION: "11.18.0"
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs['manifest-digest'] }}
+      RELEASE_DIRECTORY: ${{ github.workspace }}/storage-release
 
     steps:
-      - name: Check out the exact release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: refs/tags/${{ github.event.release.tag_name }}
-          fetch-depth: 1
+      - name: Verify the release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASE_PRERELEASE}" != "false" ]]; then
+            echo "::error::Only stable releases may publish packages"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$ ]]; then
+            echo "::error::Release tag must use the supported stable format"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Release commit must be a full commit SHA"
+            exit 1
+          fi
+          if [[ -z "${RELEASE_ALLOWED_SIGNERS}" ]]; then
+            echo "::error::RELEASE_ALLOWED_SIGNERS must contain the reviewed SSH allowed-signers entries"
+            exit 1
+          fi
+          verify_directory="$(mktemp -d "${RUNNER_TEMP}/release-tag.XXXXXX")"
+          trap 'rm -rf "${verify_directory}"' EXIT
+          allowed_signers="${RUNNER_TEMP}/release-allowed-signers"
+          umask 077
+          printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
+          chmod 0600 "${allowed_signers}"
+          git init --bare "${verify_directory}"
+          git -C "${verify_directory}" remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git -C "${verify_directory}" config gpg.format ssh
+          git -C "${verify_directory}" config gpg.ssh.allowedSignersFile "${allowed_signers}"
+          git -C "${verify_directory}" fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          [[ "$(git -C "${verify_directory}" cat-file -t "refs/tags/${RELEASE_TAG}")" == "tag" ]]
+          git -C "${verify_directory}" verify-tag "refs/tags/${RELEASE_TAG}"
+          [[ "$(git -C "${verify_directory}" rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" == "${RELEASE_COMMIT}" ]]
+          git -C "${verify_directory}" merge-base --is-ancestor \
+            "${RELEASE_COMMIT}" refs/remotes/origin/main
 
-      - name: Set up Node.js and the npm registry
+      - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.18.0
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Check the npm version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(npm --version)" == "${REVIEWED_NPM_VERSION}" ]]
 
       - name: Download the prepared release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: storage-release-${{ github.run_id }}
-          path: .release
+          path: ${{ github.workspace }}/storage-release
 
-      - name: Publish verified prepared tarballs
-        run: node scripts/release-packages.mjs publish --expected-release-commit "${RELEASE_COMMIT}" --manifest .release/package-manifest.json
+      - name: Verify and publish the prepared release
+        shell: bash
+        run: |
+          set -euo pipefail
+          publisher="$(mktemp "${RUNNER_TEMP}/publish-release.XXXXXX.mjs")"
+          trap 'rm -f "${publisher}"' EXIT
+          cat > "${publisher}" <<'NODE'
+          import { spawnSync } from "node:child_process";
+          import { createHash, timingSafeEqual } from "node:crypto";
+          import {
+            chmod,
+            lstat,
+            mkdtemp,
+            readFile,
+            readdir,
+            rm,
+            writeFile,
+          } from "node:fs/promises";
+          import { tmpdir } from "node:os";
+          import { basename, join, resolve } from "node:path";
+
+          const registry = "https://registry.npmjs.org/";
+          const definitions = [
+            ["@pegma/storage-core", "storage-core"],
+            ["@pegma/storage-azure-tables", "storage-azure-tables"],
+            ["@pegma/storage-cloudflare-d1", "storage-cloudflare-d1"],
+            ["@pegma/storage-dynamodb", "storage-dynamodb"],
+          ];
+          const stableVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+          const releaseTag = /^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$/u;
+
+          function fail(message) {
+            throw new Error(message);
+          }
+
+          function equal(left, right) {
+            const leftBytes = Buffer.from(left);
+            const rightBytes = Buffer.from(right);
+            return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+          }
+
+          const releaseDirectory = resolve(process.env.RELEASE_DIRECTORY);
+          const manifestPath = join(releaseDirectory, "package-manifest.json");
+          const manifestBytes = await readFile(manifestPath);
+          const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
+          const expectedManifestDigest = process.env.EXPECTED_MANIFEST_DIGEST ?? "";
+          if (!/^[0-9a-f]{64}$/u.test(expectedManifestDigest)) {
+            fail("prepared manifest digest is missing or invalid");
+          }
+          if (!equal(manifestDigest, expectedManifestDigest)) {
+            fail("prepared manifest digest does not match");
+          }
+          const manifest = JSON.parse(manifestBytes.toString("utf8"));
+          if (
+            JSON.stringify(Object.keys(manifest).sort()) !==
+              JSON.stringify(["gitCommit", "packages", "releaseTag", "schemaVersion"]) ||
+            manifest.schemaVersion !== 1 ||
+            manifest.gitCommit !== process.env.RELEASE_COMMIT ||
+            manifest.releaseTag !== process.env.RELEASE_TAG ||
+            !releaseTag.test(manifest.releaseTag) ||
+            !Array.isArray(manifest.packages) ||
+            manifest.packages.length !== definitions.length
+          ) {
+            fail("prepared manifest header is invalid");
+          }
+
+          const expectedFiles = ["package-manifest.json", ...manifest.packages.map(({ tarball }) => tarball)].sort();
+          const entries = await readdir(releaseDirectory, { withFileTypes: true });
+          if (JSON.stringify(entries.map(({ name }) => name).sort()) !== JSON.stringify(expectedFiles)) {
+            fail("prepared release inventory is invalid");
+          }
+          for (const entry of entries) {
+            const details = await lstat(join(releaseDirectory, entry.name));
+            if (entry.name.startsWith(".") || !entry.isFile() || details.isSymbolicLink()) {
+              fail("prepared release inventory must contain regular files only");
+            }
+          }
+
+          const tagVersion = manifest.releaseTag.slice(1);
+          const packageVersions = new Map(manifest.packages.map(({ name, version }) => [name, version]));
+          let selected = 0;
+          for (const [index, record] of manifest.packages.entries()) {
+            const [name, directory] = definitions[index];
+            const expectedTarball = `${name.slice(1).replace("/", "-")}-${record.version}.tgz`;
+            if (
+              JSON.stringify(Object.keys(record).sort()) !==
+                JSON.stringify(["directory", "files", "integrity", "name", "package", "publish", "sha256", "shasum", "tarball", "version"]) ||
+              record.name !== name ||
+              record.directory !== directory ||
+              !stableVersion.test(record.version) ||
+              record.tarball !== expectedTarball ||
+              basename(record.tarball) !== record.tarball ||
+              record.publish !== (record.version === tagVersion) ||
+              !/^[0-9a-f]{64}$/u.test(record.sha256) ||
+              !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(record.integrity) ||
+              !/^[0-9a-f]{40}$/u.test(record.shasum) ||
+              !Array.isArray(record.files) ||
+              record.package?.name !== record.name ||
+              record.package?.version !== record.version ||
+              record.package?.license !== "MIT" ||
+              record.package?.type !== "module" ||
+              record.package?.publishConfig?.access !== "public" ||
+              record.package?.repository?.url !== "git+https://github.com/pegma-dev/storage-core.git" ||
+              record.package?.repository?.directory !== `packages/${directory}` ||
+              record.files.some(
+                (file) =>
+                  file === null ||
+                  typeof file !== "object" ||
+                  typeof file.path !== "string" ||
+                  !Number.isSafeInteger(file.size) ||
+                  file.size < 0,
+              )
+            ) {
+              fail(`prepared metadata for ${name} is invalid`);
+            }
+            selected += record.publish ? 1 : 0;
+            for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
+              for (const [dependency, version] of Object.entries(record.package[section] ?? {})) {
+                if (packageVersions.has(dependency) && version !== packageVersions.get(dependency)) {
+                  fail(`${record.name} has an invalid internal dependency pin`);
+                }
+              }
+            }
+            const tarballPath = join(releaseDirectory, record.tarball);
+            const tarball = await readFile(tarballPath);
+            const sha256 = createHash("sha256").update(tarball).digest("hex");
+            const sha512 = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+            const shasum = createHash("sha1").update(tarball).digest("hex");
+            if (!equal(sha256, record.sha256) || !equal(sha512, record.integrity) || !equal(shasum, record.shasum)) {
+              fail(`${record.name} tarball digest does not match`);
+            }
+            record.tarballPath = tarballPath;
+          }
+          if (selected === 0) {
+            fail("prepared manifest has no release candidates");
+          }
+
+          const configDirectory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "npm-config-"));
+          await chmod(configDirectory, 0o700);
+          const userConfig = join(configDirectory, "userconfig");
+          const globalConfig = join(configDirectory, "globalconfig");
+          await writeFile(userConfig, "", { mode: 0o600 });
+          await writeFile(globalConfig, "", { mode: 0o600 });
+          await chmod(userConfig, 0o600);
+          await chmod(globalConfig, 0o600);
+
+          function npmEnvironment() {
+            const selectedEnvironment = {};
+            const exact = new Set(["PATH", "HOME", "CI", "SYSTEMROOT", "RUNNER_TEMP", "RUNNER_TOOL_CACHE", "TEMP", "TMP", "TMPDIR"]);
+            for (const [key, value] of Object.entries(process.env)) {
+              const upper = key.toUpperCase();
+              if (exact.has(upper) || upper.startsWith("GITHUB_") || upper.startsWith("ACTIONS_ID_TOKEN_")) {
+                selectedEnvironment[key] = value;
+              }
+            }
+            selectedEnvironment.NPM_CONFIG_USERCONFIG = userConfig;
+            selectedEnvironment.NPM_CONFIG_GLOBALCONFIG = globalConfig;
+            return selectedEnvironment;
+          }
+
+          function npm(arguments_, options = {}) {
+            const result = spawnSync("npm", arguments_, {
+              cwd: options.cwd,
+              encoding: "utf8",
+              env: npmEnvironment(),
+              stdio: options.inherit ? "inherit" : "pipe",
+            });
+            if (result.error) throw result.error;
+            if (result.status !== 0 && !options.allowFailure) fail(`npm ${arguments_.join(" ")} failed`);
+            return result;
+          }
+
+          const npmVersion = npm(["--version"]).stdout.trim();
+          const npmMatch = /^(\d+)\.(\d+)\.(\d+)(?:-.+)?$/u.exec(npmVersion);
+          if (
+            npmMatch === null ||
+            Number(npmMatch[1]) < 11 ||
+            (Number(npmMatch[1]) === 11 && Number(npmMatch[2]) < 5) ||
+            (Number(npmMatch[1]) === 11 && Number(npmMatch[2]) === 5 && Number(npmMatch[3]) < 1)
+          ) {
+            fail("npm 11.5.1 or newer is required");
+          }
+
+          function registryIntegrity(record) {
+            const specifier = `${record.name}@${record.version}`;
+            const result = npm(["view", specifier, "dist.integrity", "--json", "--registry", registry], { allowFailure: true });
+            if (result.status === 0) {
+              const value = JSON.parse(result.stdout);
+              if (typeof value !== "string" || value.length === 0) fail(`${specifier} exists without registry integrity`);
+              return value;
+            }
+            const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+            if (/\bE404\b/u.test(output)) return null;
+            fail(`registry lookup failed for ${specifier}`);
+          }
+
+          const pause = (milliseconds) => new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
+          try {
+            for (const record of manifest.packages.filter(({ publish }) => publish)) {
+              const existing = registryIntegrity(record);
+              if (existing !== null) {
+                if (!equal(existing, record.integrity)) fail(`${record.name}@${record.version} has different registry integrity`);
+                process.stdout.write(`Verified existing ${record.name}@${record.version}; skipping.\n`);
+                continue;
+              }
+              const publishDirectory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "npm-publish-"));
+              try {
+                npm([
+                  "publish",
+                  record.tarballPath,
+                  "--access",
+                  "public",
+                  "--provenance",
+                  "--ignore-scripts",
+                  "--registry",
+                  registry,
+                ], { cwd: publishDirectory, inherit: true });
+              } finally {
+                await rm(publishDirectory, { recursive: true, force: true });
+              }
+              let confirmed = false;
+              for (let attempt = 0; attempt < 6; attempt += 1) {
+                const published = registryIntegrity(record);
+                if (published !== null && equal(published, record.integrity)) {
+                  confirmed = true;
+                  break;
+                }
+                if (attempt < 5) await pause(2 ** attempt * 1000);
+              }
+              if (!confirmed) fail(`${record.name}@${record.version} did not become visible`);
+            }
+          } finally {
+            await rm(configDirectory, { recursive: true, force: true });
+          }
+          NODE
+          node "${publisher}"

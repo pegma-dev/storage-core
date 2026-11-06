@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import {
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
@@ -17,6 +19,7 @@ const REPOSITORY_URL = "git+https://github.com/pegma-dev/storage-core.git";
 const NODE_RANGE = ">=22";
 const REVIEWED_PNPM_VERSION = "10.34.5";
 const STABLE_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
+const RELEASE_TAG_PATTERN = /^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$/u;
 const EXACT_PIN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u;
 const CARET_RANGE = /^\^(\d+)(?:\.(\d+))?(?:\.(\d+))?$/u;
@@ -91,13 +94,62 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
+export function isolatedNpmEnvironment(
+  source,
+  userConfigPath,
+  globalConfigPath,
+) {
+  const environment = {};
+  const exact = new Set([
+    "PATH",
+    "HOME",
+    "CI",
+    "SYSTEMROOT",
+    "RUNNER_TEMP",
+    "RUNNER_TOOL_CACHE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+  ]);
+  for (const [key, value] of Object.entries(source)) {
+    const upper = key.toUpperCase();
+    if (
+      exact.has(upper) ||
+      upper.startsWith("GITHUB_") ||
+      upper.startsWith("ACTIONS_ID_TOKEN_")
+    ) {
+      environment[key] = value;
+    }
+  }
+  environment.NPM_CONFIG_USERCONFIG = userConfigPath;
+  environment.NPM_CONFIG_GLOBALCONFIG = globalConfigPath;
+  return environment;
+}
+
 function runNpm(arguments_, options = {}) {
   // Always invoke npm itself. `pnpm run` sets npm_execpath to pnpm, and
   // trusted publishing plus `npm pack --json` are npm-registry operations.
-  return run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
-    ...options,
-    shell: process.platform === "win32",
-  });
+  const configDirectory = mkdtempSync(join(tmpdir(), "pegma-npm-config-"));
+  chmodSync(configDirectory, 0o700);
+  const userConfigPath = join(configDirectory, "userconfig");
+  const globalConfigPath = join(configDirectory, "globalconfig");
+  try {
+    writeFileSync(userConfigPath, "", { mode: 0o600 });
+    writeFileSync(globalConfigPath, "", { mode: 0o600 });
+    chmodSync(userConfigPath, 0o600);
+    chmodSync(globalConfigPath, 0o600);
+    return run(process.platform === "win32" ? "npm.cmd" : "npm", arguments_, {
+      ...options,
+      env: isolatedNpmEnvironment(
+        options.env ?? process.env,
+        userConfigPath,
+        globalConfigPath,
+      ),
+      shell: process.platform === "win32",
+    });
+  } finally {
+    rmSync(configDirectory, { recursive: true, force: true });
+  }
 }
 
 function decodeYamlScalar(raw) {
@@ -309,6 +361,7 @@ function gitCommand() {
 function hashTarball(bytes) {
   return {
     shasum: createHash("sha1").update(bytes).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
     integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
   };
 }
@@ -459,17 +512,38 @@ async function publicWorkspaceInventory(root) {
   return names.sort();
 }
 
+async function removeTsBuildInfo(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name !== "node_modules" && entry.name !== "dist") {
+        await removeTsBuildInfo(path);
+      }
+    } else if (entry.isFile() && entry.name.endsWith(".tsbuildinfo")) {
+      await rm(path, { force: true });
+    }
+  }
+}
+
+async function cleanWorkspaceBuildArtifacts(root) {
+  for (const { directory } of RELEASE_PACKAGES) {
+    const packageDirectory = join(root, "packages", directory);
+    await rm(join(packageDirectory, "dist"), { recursive: true, force: true });
+    await removeTsBuildInfo(packageDirectory);
+  }
+}
+
 export function validateReleaseTag(options = {}) {
   const root = resolve(options.root ?? defaultRoot());
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
   const expectedReleaseCommit =
     options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
-  if (releaseTag === undefined || !/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
-    fail("a stable release tag is required");
+  if (releaseTag === undefined || !RELEASE_TAG_PATTERN.test(releaseTag)) {
+    fail("a stable vX.Y.Z release tag at v0.1.0 or later is required");
   }
   if (
     expectedReleaseCommit === undefined ||
-    !/^[0-9a-f]{40,64}$/u.test(expectedReleaseCommit)
+    !/^[0-9a-f]{40}$/u.test(expectedReleaseCommit)
   ) {
     fail("an exact release event commit is required");
   }
@@ -566,8 +640,8 @@ export async function validateRepository(options = {}) {
 
   const releaseTag = options.releaseTag ?? process.env.RELEASE_TAG;
   if (releaseTag !== undefined) {
-    if (!/^v\d+\.\d+\.\d+$/u.test(releaseTag)) {
-      fail("release tag must be a stable vX.Y.Z tag");
+    if (!RELEASE_TAG_PATTERN.test(releaseTag)) {
+      fail("release tag must be a stable vX.Y.Z tag at v0.1.0 or later");
     }
     const version = releaseTag.slice(1);
     if (!packages.some(({ manifest }) => manifest.version === version)) {
@@ -655,10 +729,20 @@ async function smokeTestTarballs(root, packageRecords) {
 
 function queryRegistryIntegrity(name, version) {
   const spec = `${name}@${version}`;
-  const result = runNpm(["view", spec, "dist.integrity", "--json"], {
-    capture: true,
-    allowFailure: true,
-  });
+  const result = runNpm(
+    [
+      "view",
+      spec,
+      "dist.integrity",
+      "--json",
+      "--registry",
+      "https://registry.npmjs.org/",
+    ],
+    {
+      capture: true,
+      allowFailure: true,
+    },
+  );
   if (result.status === 0) {
     const integrity = JSON.parse(result.stdout);
     if (typeof integrity !== "string" || integrity.length === 0) {
@@ -683,13 +767,42 @@ export function decidePublication(localIntegrity, registryIntegrity) {
   fail("the registry version exists with different tarball integrity");
 }
 
+export async function verifyReleaseInventory(manifestPath, suppliedManifest) {
+  const directory = resolve(dirname(manifestPath));
+  const manifest = suppliedManifest ?? (await readJson(manifestPath));
+  if (!Array.isArray(manifest.packages)) {
+    fail("prepared package manifest has no package inventory");
+  }
+  const expected = [
+    "package-manifest.json",
+    ...manifest.packages.map(({ tarball }) => tarball),
+  ].sort();
+  const entries = await readdir(directory, { withFileTypes: true });
+  const actual = entries.map(({ name }) => name).sort();
+  if (!sameJson(actual, expected)) {
+    fail("release output inventory does not match the package manifest");
+  }
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    const details = await lstat(path);
+    if (
+      entry.name.startsWith(".") ||
+      !entry.isFile() ||
+      details.isSymbolicLink()
+    ) {
+      fail("release output may contain only expected regular files");
+    }
+  }
+  return manifest;
+}
+
 export async function prepareRelease(options = {}) {
   const { root, packages, releaseTag } = await validateRepository(options);
   const gitCommit = run(gitCommand(), ["rev-parse", "HEAD"], {
     cwd: root,
     capture: true,
   }).stdout.trim();
-  if (!/^[0-9a-f]{40,64}$/u.test(gitCommit)) {
+  if (!/^[0-9a-f]{40}$/u.test(gitCommit)) {
     fail(`git returned an invalid commit SHA: ${gitCommit}`);
   }
   const output = resolve(root, options.output ?? ".release");
@@ -698,6 +811,7 @@ export async function prepareRelease(options = {}) {
     fail(`release output directory must be empty: ${output}`);
   }
 
+  await cleanWorkspaceBuildArtifacts(root);
   runNpm(["run", "build"], { cwd: root });
   const records = [];
   const tagVersion = releaseTag?.slice(1);
@@ -737,6 +851,7 @@ export async function prepareRelease(options = {}) {
       tarball: basename(tarballPath),
       tarballPath,
       integrity: hashes.integrity,
+      sha256: hashes.sha256,
       shasum: hashes.shasum,
       publish: tagVersion === undefined || manifest.version === tagVersion,
       files: packed.files
@@ -745,8 +860,6 @@ export async function prepareRelease(options = {}) {
       manifest,
     });
   }
-  await smokeTestTarballs(root, records);
-
   if (releaseTag !== undefined) {
     for (const record of records.filter(({ publish }) => !publish)) {
       const registryIntegrity = queryRegistryIntegrity(
@@ -769,20 +882,34 @@ export async function prepareRelease(options = {}) {
     gitCommit,
     releaseTag: releaseTag ?? null,
     packages: records.map(
-      ({ tarballPath, manifest: _manifest, ...record }) => record,
+      ({ tarballPath, manifest: packageManifest, ...record }) => ({
+        ...record,
+        package: packageManifest,
+      }),
     ),
   };
   const manifestPath = join(output, "package-manifest.json");
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  await verifyReleaseInventory(manifestPath, manifest);
+  if (!options.skipSmoke) {
+    await smokeTestTarballs(root, records);
+  }
   return { manifestPath, manifest };
 }
 
 async function verifyPreparedManifest(manifestPath) {
-  const manifest = await readJson(manifestPath);
+  const manifest = await verifyReleaseInventory(manifestPath);
   if (
+    !sameJson(Object.keys(manifest).sort(), [
+      "gitCommit",
+      "packages",
+      "releaseTag",
+      "schemaVersion",
+    ]) ||
     manifest.schemaVersion !== 1 ||
-    !/^[0-9a-f]{40,64}$/u.test(manifest.gitCommit) ||
-    !/^v\d+\.\d+\.\d+$/u.test(manifest.releaseTag) ||
+    !/^[0-9a-f]{40}$/u.test(manifest.gitCommit) ||
+    (manifest.releaseTag !== null &&
+      !RELEASE_TAG_PATTERN.test(manifest.releaseTag)) ||
     !Array.isArray(manifest.packages) ||
     !sameJson(
       manifest.packages.map(({ name }) => name),
@@ -798,25 +925,76 @@ async function verifyPreparedManifest(manifestPath) {
   if (!safeEqual(currentCommit, manifest.gitCommit)) {
     fail("prepared package manifest commit does not match the checkout");
   }
-  const tagVersion = manifest.releaseTag.slice(1);
+  const tagVersion = manifest.releaseTag?.slice(1) ?? null;
   if (!manifest.packages.some(({ publish }) => publish)) {
     fail("prepared package manifest has no release candidates");
   }
+  const packageVersions = new Map(
+    manifest.packages.map(({ name, version }) => [name, version]),
+  );
   for (const [index, record] of manifest.packages.entries()) {
     const definition = RELEASE_PACKAGES[index];
     const expectedTarball = `${definition.name
       .slice(1)
       .replace("/", "-")}-${record.version}.tgz`;
     if (
+      !sameJson(Object.keys(record).sort(), [
+        "directory",
+        "files",
+        "integrity",
+        "name",
+        "package",
+        "publish",
+        "sha256",
+        "shasum",
+        "tarball",
+        "version",
+      ]) ||
       record.directory !== definition.directory ||
+      record.name !== definition.name ||
       record.tarball !== expectedTarball ||
       !STABLE_SEMVER.test(record.version) ||
-      record.publish !== (record.version === tagVersion) ||
-      typeof record.integrity !== "string" ||
-      typeof record.shasum !== "string" ||
-      !Array.isArray(record.files)
+      record.publish !==
+        (tagVersion === null || record.version === tagVersion) ||
+      !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(record.integrity) ||
+      !/^[0-9a-f]{64}$/u.test(record.sha256) ||
+      !/^[0-9a-f]{40}$/u.test(record.shasum) ||
+      record.package?.name !== record.name ||
+      record.package?.version !== record.version ||
+      record.package?.license !== "MIT" ||
+      record.package?.type !== "module" ||
+      record.package?.publishConfig?.access !== "public" ||
+      record.package?.repository?.url !== REPOSITORY_URL ||
+      record.package?.repository?.directory !==
+        `packages/${definition.directory}` ||
+      !Array.isArray(record.files) ||
+      record.files.some(
+        (file) =>
+          file === null ||
+          typeof file !== "object" ||
+          typeof file.path !== "string" ||
+          !Number.isSafeInteger(file.size) ||
+          file.size < 0,
+      )
     ) {
       fail(`${record.name} has invalid prepared metadata`);
+    }
+    for (const section of [
+      "dependencies",
+      "devDependencies",
+      "optionalDependencies",
+      "peerDependencies",
+    ]) {
+      for (const [dependency, version] of Object.entries(
+        record.package[section] ?? {},
+      )) {
+        if (
+          packageVersions.has(dependency) &&
+          version !== packageVersions.get(dependency)
+        ) {
+          fail(`${record.name} has an invalid internal dependency pin`);
+        }
+      }
     }
     const tarball = resolve(dirname(manifestPath), record.tarball);
     if (dirname(tarball) !== resolve(dirname(manifestPath))) {
@@ -825,12 +1003,37 @@ async function verifyPreparedManifest(manifestPath) {
     const hashes = hashTarball(await readFile(tarball));
     if (
       !safeEqual(hashes.integrity, record.integrity) ||
+      !safeEqual(hashes.sha256, record.sha256) ||
       !safeEqual(hashes.shasum, record.shasum)
     ) {
       fail(`${record.name} prepared tarball has changed`);
     }
   }
   return manifest;
+}
+
+export async function smokePreparedRelease(options = {}) {
+  const manifestPath = resolve(
+    options.manifest ?? ".release/package-manifest.json",
+  );
+  const manifest = await verifyPreparedManifest(manifestPath);
+  const expectedReleaseCommit =
+    options.expectedReleaseCommit ?? process.env.RELEASE_COMMIT;
+  if (
+    expectedReleaseCommit !== undefined &&
+    (!/^[0-9a-f]{40}$/u.test(expectedReleaseCommit) ||
+      !safeEqual(manifest.gitCommit, expectedReleaseCommit))
+  ) {
+    fail("prepared package manifest must match the release event commit");
+  }
+  await smokeTestTarballs(
+    defaultRoot(),
+    manifest.packages.map((record) => ({
+      ...record,
+      manifest: record.package,
+      tarballPath: resolve(dirname(manifestPath), record.tarball),
+    })),
+  );
 }
 
 function requireTrustedPublishingNpm() {
@@ -889,7 +1092,7 @@ export async function publishPreparedRelease(options = {}) {
   }
   if (
     expectedReleaseCommit === undefined ||
-    !/^[0-9a-f]{40,64}$/u.test(expectedReleaseCommit) ||
+    !/^[0-9a-f]{40}$/u.test(expectedReleaseCommit) ||
     !safeEqual(manifest.gitCommit, expectedReleaseCommit)
   ) {
     fail("prepared package manifest must match the release event commit");
@@ -907,9 +1110,26 @@ export async function publishPreparedRelease(options = {}) {
       continue;
     }
     const tarball = resolve(dirname(manifestPath), record.tarball);
-    runNpm(["publish", tarball, "--access", "public", "--provenance"], {
-      cwd: dirname(manifestPath),
-    });
+    const publishDirectory = await mkdtemp(
+      join(tmpdir(), "pegma-release-publish-"),
+    );
+    try {
+      runNpm(
+        [
+          "publish",
+          tarball,
+          "--access",
+          "public",
+          "--provenance",
+          "--ignore-scripts",
+          "--registry",
+          "https://registry.npmjs.org/",
+        ],
+        { cwd: publishDirectory },
+      );
+    } finally {
+      await rm(publishDirectory, { recursive: true, force: true });
+    }
     confirmRegistryIntegrity(record);
   }
 }
@@ -931,6 +1151,10 @@ export function parseArguments(arguments_) {
     }
     if (argument === "--require-release-tag") {
       options.requireReleaseTag = true;
+      continue;
+    }
+    if (argument === "--skip-smoke") {
+      options.skipSmoke = true;
       continue;
     }
     const key =
@@ -973,7 +1197,12 @@ async function main() {
     await publishPreparedRelease(options);
     return;
   }
-  fail("usage: release-packages.mjs <check|pack|publish> [options]");
+  if (command === "smoke") {
+    await smokePreparedRelease(options);
+    process.stdout.write("Prepared release packages passed smoke checks.\n");
+    return;
+  }
+  fail("usage: release-packages.mjs <check|pack|smoke|publish> [options]");
 }
 
 const isMain =

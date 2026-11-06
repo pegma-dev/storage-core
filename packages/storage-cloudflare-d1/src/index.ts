@@ -36,6 +36,18 @@ const D1_ERROR_PREFIX = "D1_ERROR: ";
  */
 const MAX_TRANSACTION_ACTIONS = 100;
 
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
 const schemaInitializations = new WeakMap<
   CloudflareD1Database,
   Promise<void>
@@ -201,13 +213,14 @@ const GUARD_MISSING = `
   )
 `;
 
+// `IS NOT` keeps the mismatch test total even if either side is ever NULL.
 const GUARD_CHANGED = `
   INSERT INTO ${GUARD_TABLE} (reason)
   SELECT 'changed'
   WHERE EXISTS (
     SELECT 1 FROM ${RECORDS_TABLE}
     WHERE partition_key = ? AND row_key = ? AND deleted = 0
-      AND CAST(version AS TEXT) <> ?
+      AND CAST(version AS TEXT) IS NOT ?
   )
 `;
 
@@ -354,6 +367,11 @@ function encoded<T>(
   value: T,
 ): { readonly json: string } {
   const record = definition.codec.encode(value);
+  for (const stored of Object.values(record)) {
+    if (typeof stored === "number" && !Number.isFinite(stored)) {
+      throw new TypeError("Stored record numbers must be finite.");
+    }
+  }
   return {
     json: JSON.stringify(record),
   };
@@ -559,6 +577,7 @@ export function createCloudflareD1Store(
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           await ensureSchema();
           const key = definition.key(value);
           const stored = encoded(definition, value);
@@ -673,6 +692,7 @@ export function createCloudflareD1Store(
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           await ensureSchema();
           const deleted = await database
             .prepare(DELETE_IF_UNCHANGED)
@@ -690,6 +710,12 @@ export function createCloudflareD1Store(
             throw new StorageError(
               `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
             );
+          }
+
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
           }
 
           const keys = actions.map((step) =>

@@ -206,6 +206,10 @@ export interface CollectionStore<T> {
    * record. Reach for this when the version was read in an earlier request
    * and handed back by the caller, which `update` cannot express because its
    * decider sees the record but never the version.
+   *
+   * The version must be a string containing a non-whitespace character. A
+   * token whose trimmed value is `*` is reserved and rejected. Invalid tokens
+   * throw {@link TypeError}.
    */
   putIfUnchanged(value: T, version: string): Promise<boolean>;
 
@@ -254,6 +258,10 @@ export interface CollectionStore<T> {
    * deleted; an unconditional delete would discard that newer state. Returns
    * false if the record changed or is already gone, both of which mean "leave
    * it alone" rather than "something went wrong".
+   *
+   * The version must be a string containing a non-whitespace character. A
+   * token whose trimmed value is `*` is reserved and rejected. Invalid tokens
+   * throw {@link TypeError}.
    */
   deleteIfUnchanged(key: EntityKey, version: string): Promise<boolean>;
 
@@ -263,6 +271,7 @@ export interface CollectionStore<T> {
    * Every action must target `partition`, and no key may appear twice. Both
    * are rejected with a {@link StorageError} rather than being attempted,
    * because a backend would refuse them with a far less useful message.
+   * A transaction may carry at most 100 actions.
    *
    * A refused precondition is an outcome, not an error: the result names the
    * action that was refused and why, so a caller can turn it into whatever
@@ -292,6 +301,7 @@ export type TransactionAction<T> =
   | {
       readonly action: "putIfUnchanged";
       readonly value: T;
+      /** Subject to the same token rules as {@link CollectionStore.putIfUnchanged}. */
       readonly version: string;
     }
   | { readonly action: "delete"; readonly key: EntityKey };
@@ -334,6 +344,29 @@ export interface Store {
 interface StoredRow {
   readonly record: StoredRecord;
   readonly version: bigint;
+}
+
+const MAX_TRANSACTION_ACTIONS = 100;
+
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
+function cloneStoredRecord(record: StoredRecord): StoredRecord {
+  for (const value of Object.values(record)) {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("Stored record numbers must be finite.");
+    }
+  }
+  return structuredClone(record);
 }
 
 /** Partitions hold rows by id; a collection holds partitions by name. */
@@ -530,13 +563,12 @@ export function createMemoryStore(): Store {
 
       function versioned(row: StoredRow): VersionedRecord<T> {
         return {
-          value: codec.decode(row.record),
+          value: codec.decode(cloneStoredRecord(row.record)),
           version: String(row.version),
         };
       }
 
-      function write(key: EntityKey, value: T): T {
-        const record = codec.encode(value);
+      function writeRecord(key: EntityKey, record: StoredRecord): T {
         versionGeneration += 1n;
         upsertMap(
           partitions,
@@ -545,7 +577,11 @@ export function createMemoryStore(): Store {
         ).set(key.id, { record, version: versionGeneration });
         // Decode what was stored rather than echoing the input, so callers see
         // the same value a later `get` would return.
-        return codec.decode(record);
+        return codec.decode(cloneStoredRecord(record));
+      }
+
+      function write(key: EntityKey, value: T): T {
+        return writeRecord(key, cloneStoredRecord(codec.encode(value)));
       }
 
       function dropIfEmpty(partition: string): void {
@@ -557,7 +593,9 @@ export function createMemoryStore(): Store {
       return {
         async get(key) {
           const row = read(key);
-          return row === undefined ? null : codec.decode(row.record);
+          return row === undefined
+            ? null
+            : codec.decode(cloneStoredRecord(row.record));
         },
 
         async getVersioned(key) {
@@ -569,7 +607,10 @@ export function createMemoryStore(): Store {
           const key = definition.key(value);
           const existing = read(key);
           if (existing !== undefined) {
-            return { inserted: false, value: codec.decode(existing.record) };
+            return {
+              inserted: false,
+              value: codec.decode(cloneStoredRecord(existing.record)),
+            };
           }
           return { inserted: true, value: write(key, value) };
         },
@@ -580,6 +621,7 @@ export function createMemoryStore(): Store {
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           const key = definition.key(value);
           const row = read(key);
           if (row === undefined || String(row.version) !== version) {
@@ -595,7 +637,9 @@ export function createMemoryStore(): Store {
           for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             const before = read(key);
             const current =
-              before === undefined ? null : codec.decode(before.record);
+              before === undefined
+                ? null
+                : codec.decode(cloneStoredRecord(before.record));
             const decision = await decide(current);
 
             if (decision.action === "keep") {
@@ -620,7 +664,9 @@ export function createMemoryStore(): Store {
           const rows = partitions.get(partition);
           return rows === undefined
             ? []
-            : [...rows.values()].map((row) => codec.decode(row.record));
+            : [...rows.values()].map((row) =>
+                codec.decode(cloneStoredRecord(row.record)),
+              );
         },
 
         async listVersioned(partition) {
@@ -676,6 +722,7 @@ export function createMemoryStore(): Store {
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           const row = read(key);
           if (row === undefined || String(row.version) !== version) {
             return false;
@@ -687,10 +734,26 @@ export function createMemoryStore(): Store {
         },
 
         async transact(partition, actions) {
+          if (actions.length > MAX_TRANSACTION_ACTIONS) {
+            throw new StorageError(
+              `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
+            );
+          }
+
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
+          }
           const keys = actions.map((step) =>
             step.action === "delete" ? step.key : definition.key(step.value),
           );
           assertOnePartition(definition.name, partition, keys);
+          const records = actions.map((step) =>
+            step.action === "delete"
+              ? undefined
+              : cloneStoredRecord(codec.encode(step.value)),
+          );
 
           // Every precondition is checked before anything is applied. Nothing
           // between here and the last write awaits, so no other writer can
@@ -732,7 +795,7 @@ export function createMemoryStore(): Store {
               partitions.get(key.partition)?.delete(key.id);
               dropIfEmpty(key.partition);
             } else {
-              write(key, step.value);
+              writeRecord(key, records[index] as StoredRecord);
             }
           }
 
