@@ -201,6 +201,21 @@ export const conformanceCases: readonly ConformanceCase[] = [
     assert.equal(result.value.label, "Fresh");
   }),
 
+  testCase("insertIfAbsent returns an isolated value", async (store) => {
+    const collection = store.collection(mutableWidgets);
+    const input: MutableWidget = {
+      group: "tools",
+      id: "hammer",
+      label: "stored",
+    };
+    const result = await collection.insertIfAbsent(input);
+    input.label = "changed input";
+    result.value.label = "changed result";
+
+    const stored = await collection.get({ partition: "tools", id: "hammer" });
+    assert.equal(stored?.label, "stored");
+  }),
+
   testCase(
     "insertIfAbsent leaves an existing record alone and returns it",
     async (store) => {
@@ -989,6 +1004,32 @@ export const conformanceCases: readonly ConformanceCase[] = [
           { action: "put", value: widget({ group: "toys", id: "ball" }) },
         ]),
         /may only touch partition/,
+      );
+    },
+  ),
+
+  testCase(
+    "transact validates every record before applying writes",
+    async (store) => {
+      const collection = store.collection(widgets);
+      await assert.rejects(
+        collection.transact("tools", [
+          { action: "put", value: widget({ id: "first" }) },
+          {
+            action: "put",
+            value: widget({ id: "second", count: Number.NaN }),
+          },
+        ]),
+        /finite/,
+      );
+
+      assert.equal(
+        await collection.get({ partition: "tools", id: "first" }),
+        null,
+      );
+      assert.equal(
+        await collection.get({ partition: "tools", id: "second" }),
+        null,
       );
     },
   ),

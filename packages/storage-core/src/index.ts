@@ -568,8 +568,7 @@ export function createMemoryStore(): Store {
         };
       }
 
-      function write(key: EntityKey, value: T): T {
-        const record = cloneStoredRecord(codec.encode(value));
+      function writeRecord(key: EntityKey, record: StoredRecord): T {
         versionGeneration += 1n;
         upsertMap(
           partitions,
@@ -579,6 +578,10 @@ export function createMemoryStore(): Store {
         // Decode what was stored rather than echoing the input, so callers see
         // the same value a later `get` would return.
         return codec.decode(cloneStoredRecord(record));
+      }
+
+      function write(key: EntityKey, value: T): T {
+        return writeRecord(key, cloneStoredRecord(codec.encode(value)));
       }
 
       function dropIfEmpty(partition: string): void {
@@ -746,6 +749,11 @@ export function createMemoryStore(): Store {
             step.action === "delete" ? step.key : definition.key(step.value),
           );
           assertOnePartition(definition.name, partition, keys);
+          const records = actions.map((step) =>
+            step.action === "delete"
+              ? undefined
+              : cloneStoredRecord(codec.encode(step.value)),
+          );
 
           // Every precondition is checked before anything is applied. Nothing
           // between here and the last write awaits, so no other writer can
@@ -787,7 +795,7 @@ export function createMemoryStore(): Store {
               partitions.get(key.partition)?.delete(key.id);
               dropIfEmpty(key.partition);
             } else {
-              write(key, step.value);
+              writeRecord(key, records[index] as StoredRecord);
             }
           }
 

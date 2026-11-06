@@ -366,7 +366,10 @@ export function createAzureTablesStore(
           const key = definition.key(value);
           try {
             await client.createEntity(entityFor(key, value));
-            return { inserted: true, value: codec.decode(codec.encode(value)) };
+            return {
+              inserted: true,
+              value: codec.decode(structuredClone(codec.encode(value))),
+            };
           } catch (error) {
             if (!isStatus(error, 409)) {
               throw error;
@@ -434,7 +437,9 @@ export function createAzureTablesStore(
               }
               return {
                 written: true,
-                value: codec.decode(codec.encode(decision.value)),
+                value: codec.decode(
+                  structuredClone(codec.encode(decision.value)),
+                ),
                 attempts: attempt,
               };
             } catch (error) {
