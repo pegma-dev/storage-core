@@ -165,7 +165,7 @@ Scan complete 2026-07-28. The following were examined and found clean:
   trusted-publisher only, requires a signed annotated tag verified against an
   allowed-signers file, an exact commit match, and registry integrity
   comparison before and after publish
-  (`.github/workflows/publish.yml`, `scripts/release-packages.mjs:639-682`).
+  (`.github/workflows/publish.yml`, `scripts/release-packages.mjs`).
 - **Secrets.** No credentials in tracked files beyond the documented Azurite
   emulator defaults (finding 2). `.gitignore` excludes `.env*` and
   `.release/`; `git ls-files` confirms no release artifacts or env files are

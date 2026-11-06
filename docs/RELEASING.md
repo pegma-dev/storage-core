@@ -87,11 +87,12 @@ replace the tag.
 Before checkout, the unprivileged preparation job verifies the stable release
 event, tag format, tag signature, exact release-event commit, and
 `origin/main` ancestry in a temporary bare repository. It then checks out that
-commit without persisted credentials, enables Corepack for the pinned pnpm,
-installs from `pnpm-lock.yaml`, runs the full gate, removes prior build output,
-and packs every public workspace exactly once. The sealed inventory contains
-only the package manifest and four tarballs, with SHA-256 and SHA-512 digests,
-and is uploaded before consumer installation begins.
+commit without persisted credentials, verifies the bundled npm 11.18.0,
+enables Corepack for the pinned pnpm, installs from `pnpm-lock.yaml`, runs the
+full gate, removes prior build output, and packs every public workspace exactly
+once. The sealed inventory contains only the package manifest and four
+tarballs, with SHA-256 and SHA-512 digests, and is uploaded before consumer
+installation begins.
 
 A separate unprivileged smoke job downloads a copy, verifies the package
 manifest digest, and installs the prepared tarballs into an isolated consumer

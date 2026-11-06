@@ -14,10 +14,43 @@ describe("publish workflow", () => {
     );
     expect(prepare).toContain("git init --bare");
     expect(prepare).toContain("fetch --no-tags origin");
+    expect(prepare).toContain("Configure checkout tag verification");
+    expect(prepare).toContain("git config --local gpg.format ssh");
+    expect(prepare).toContain('REVIEWED_NPM_VERSION: "11.18.0"');
     expect(prepare).toContain("--skip-smoke");
     expect(prepare).toContain("include-hidden-files: false");
     expect(prepare).toContain("manifest-digest:");
     expect(prepare).toContain("artifact-digest:");
+  });
+
+  it("pins the embedded publisher invariants", () => {
+    const publish = workflow.split("\n  publish:")[1]!;
+    const environment = /const exact = new Set\(\[(.*?)\]\);/su.exec(publish);
+    expect(environment).not.toBeNull();
+    expect(
+      Array.from(
+        environment![1]!.matchAll(/"([A-Z_]+)"/gu),
+        (match) => match[1],
+      ),
+    ).toEqual([
+      "PATH",
+      "HOME",
+      "CI",
+      "SYSTEMROOT",
+      "RUNNER_TEMP",
+      "RUNNER_TOOL_CACHE",
+      "TEMP",
+      "TMP",
+      "TMPDIR",
+    ]);
+    expect(publish).toContain(
+      'JSON.stringify(["gitCommit", "packages", "releaseTag", "schemaVersion"])',
+    );
+    expect(publish).toContain(
+      'JSON.stringify(["directory", "files", "integrity", "name", "package", "publish", "sha256", "shasum", "tarball", "version"])',
+    );
+    expect(publish).toContain('upper.startsWith("GITHUB_")');
+    expect(publish).toContain('upper.startsWith("ACTIONS_ID_TOKEN_")');
   });
 
   it("keeps smoke unprivileged and publish independent of a checkout", () => {

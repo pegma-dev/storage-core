@@ -213,6 +213,7 @@ const GUARD_MISSING = `
   )
 `;
 
+// `IS NOT` keeps the mismatch test total even for a malformed NULL binding.
 const GUARD_CHANGED = `
   INSERT INTO ${GUARD_TABLE} (reason)
   SELECT 'changed'
