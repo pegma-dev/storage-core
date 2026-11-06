@@ -6,9 +6,23 @@ const workflow = await readFile(
   "utf8",
 );
 
+function workflowJob(name: string): string {
+  const jobsMarker = "\njobs:\n";
+  const jobsStart = workflow.indexOf(jobsMarker);
+  if (jobsStart === -1) throw new Error("Workflow jobs were not found.");
+  const jobsSection = workflow.slice(jobsStart + jobsMarker.length);
+  const jobs = Array.from(jobsSection.matchAll(/^  ([a-z][\w-]*):$/gmu));
+  const index = jobs.findIndex((match) => match[1] === name);
+  if (index === -1) throw new Error(`Workflow job ${name} was not found.`);
+
+  const start = jobs[index]!.index;
+  const end = jobs[index + 1]?.index ?? jobsSection.length;
+  return jobsSection.slice(start, end);
+}
+
 describe("publish workflow", () => {
   it("verifies the tag before checkout and seals before smoke", () => {
-    const prepare = workflow.split("\n  smoke:")[0]!;
+    const prepare = workflowJob("prepare");
     expect(prepare.indexOf("- name: Verify the release tag")).toBeLessThan(
       prepare.indexOf("- name: Check out the exact release commit"),
     );
@@ -24,7 +38,7 @@ describe("publish workflow", () => {
   });
 
   it("pins the embedded publisher invariants", () => {
-    const publish = workflow.split("\n  publish:")[1]!;
+    const publish = workflowJob("publish");
     const environment = /const exact = new Set\(\[(.*?)\]\);/su.exec(publish);
     expect(environment).not.toBeNull();
     expect(
@@ -54,12 +68,15 @@ describe("publish workflow", () => {
   });
 
   it("keeps smoke unprivileged and publish independent of a checkout", () => {
-    const smoke = workflow.split("\n  smoke:")[1]!.split("\n  publish:")[0]!;
-    const publish = workflow.split("\n  publish:")[1]!;
+    const smoke = workflowJob("smoke");
+    const publish = workflowJob("publish");
 
     expect(smoke).toContain("permissions:\n      contents: read");
     expect(smoke).not.toContain("id-token: write");
     expect(smoke).toContain("release-packages.mjs smoke");
+    expect(smoke.indexOf("actions/checkout")).toBeLessThan(
+      smoke.indexOf("actions/download-artifact"),
+    );
     expect(publish).toContain("needs: [prepare, smoke]");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("actions/checkout");
@@ -82,8 +99,12 @@ describe("publish workflow", () => {
 
     const lines = workflow.split("\n");
     for (let index = 0; index < lines.length; index += 1) {
-      const match = /^(\s+)run: (?:\||>-)$/.exec(lines[index]!);
+      const match = /^(\s+)run:\s*(.*)$/u.exec(lines[index]!);
       if (match === null) continue;
+      expect(match[2]).not.toContain("${{ github.event");
+      expect(match[2]).not.toContain("${{ github.sha");
+      if (match[2] !== "|" && match[2] !== ">-") continue;
+
       const indentation = match[1]!.length;
       const body: string[] = [];
       for (index += 1; index < lines.length; index += 1) {

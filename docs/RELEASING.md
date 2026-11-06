@@ -91,8 +91,8 @@ commit without persisted credentials, verifies the bundled npm 11.18.0,
 enables Corepack for the pinned pnpm, installs from `pnpm-lock.yaml`, runs the
 full gate, removes prior build output, and packs every public workspace exactly
 once. The sealed inventory contains only the package manifest and four
-tarballs, with SHA-256 and SHA-512 digests, and is uploaded before consumer
-installation begins.
+tarballs, with the npm SHA-1 shasum plus SHA-256 and SHA-512 digests, and is
+uploaded before consumer installation begins.
 
 A separate unprivileged smoke job downloads a copy, verifies the package
 manifest digest, and installs the prepared tarballs into an isolated consumer
