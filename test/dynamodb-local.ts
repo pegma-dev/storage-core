@@ -42,6 +42,7 @@ export const DYNAMODB_LOCAL_TARBALL_SHA256 =
 const TARBALL_SHA256 = DYNAMODB_LOCAL_TARBALL_SHA256;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
+const TARBALL_PATH_ENV = "PEGMA_DYNAMODB_LOCAL_TARBALL_PATH";
 
 let child: ChildProcess | undefined;
 let distribution: string | undefined;
@@ -75,10 +76,11 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
 }
 
 export function dynamoDbLocalTarballPath(): string {
-  if (verifiedTarball === undefined) {
+  const tarball = process.env[TARBALL_PATH_ENV] ?? verifiedTarball;
+  if (tarball === undefined) {
     throw new Error("DynamoDB Local archive has not been staged yet.");
   }
-  return verifiedTarball;
+  return tarball;
 }
 
 async function sha256File(path: string): Promise<string> {
@@ -161,6 +163,7 @@ async function ensureVerifiedTarball(): Promise<string> {
   }
   await assertTarballHash(tarball);
   verifiedTarball = tarball;
+  process.env[TARBALL_PATH_ENV] = tarball;
   return tarball;
 }
 
@@ -234,5 +237,6 @@ export async function teardown(): Promise<void> {
     await rm(privateArchiveDirectory, { recursive: true, force: true });
     privateArchiveDirectory = undefined;
     verifiedTarball = undefined;
+    delete process.env[TARBALL_PATH_ENV];
   }
 }
