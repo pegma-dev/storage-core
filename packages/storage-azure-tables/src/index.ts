@@ -61,6 +61,18 @@ function isStatus(error: unknown, code: number): boolean {
 /** Azure refuses an entity-group transaction larger than this. */
 const MAX_TRANSACTION_ACTIONS = 100;
 
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
 interface AzureScanCursor {
   readonly collection: string;
   readonly continuation: string;
@@ -163,6 +175,9 @@ function encode(record: StoredRecord): Record<string, StoredValue> {
       throw new StorageError(
         `A record may not define the property ${JSON.stringify(name)}; that name belongs to the table.`,
       );
+    }
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("Stored record numbers must be finite.");
     }
     // Null is written by omission. Because every write replaces the whole
     // entity, an omitted property is an absent one, which is what clearing
@@ -377,6 +392,7 @@ export function createAzureTablesStore(
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           await ensureTable();
           const key = definition.key(value);
           try {
@@ -504,6 +520,7 @@ export function createAzureTablesStore(
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           await ensureTable();
           try {
             await client.deleteEntity(
@@ -524,6 +541,11 @@ export function createAzureTablesStore(
         },
 
         async transact(partition, actions) {
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
+          }
           const keys = actions.map((step) =>
             step.action === "delete" ? step.key : definition.key(step.value),
           );

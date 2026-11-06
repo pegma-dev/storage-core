@@ -51,6 +51,18 @@ const ILLEGAL_KEY_CHARS = /[/\\#?\u0000-\u001F\u007F-\u009F]/;
 /** DynamoDB TransactWriteItems accepts at most this many operations. */
 const MAX_TRANSACTION_ACTIONS = 100;
 
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
 const TABLE_NAME_PATTERN = /^[A-Za-z0-9_.-]{3,255}$/;
 
 interface DynamoDbScanCursor {
@@ -449,7 +461,13 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
       }
 
       function encoded(value: T): { readonly json: string } {
-        return { json: JSON.stringify(codec.encode(value)) };
+        const record = codec.encode(value);
+        for (const stored of Object.values(record)) {
+          if (typeof stored === "number" && !Number.isFinite(stored)) {
+            throw new TypeError("Stored record numbers must be finite.");
+          }
+        }
+        return { json: JSON.stringify(record) };
       }
 
       function versioned(item: PhysicalItem): VersionedRecord<T> {
@@ -575,6 +593,7 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           await ensureTable();
           const key = definition.key(value);
           const stored = encoded(value);
@@ -769,6 +788,7 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           await ensureTable();
           try {
             await client.send(
@@ -799,6 +819,12 @@ export function createDynamoDbStore(options: DynamoDbStoreOptions): Store {
             throw new StorageError(
               `A transaction may carry at most ${MAX_TRANSACTION_ACTIONS} actions, and this one has ${actions.length}.`,
             );
+          }
+
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
           }
 
           const keys = actions.map((step) =>

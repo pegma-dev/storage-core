@@ -336,6 +336,27 @@ interface StoredRow {
   readonly version: bigint;
 }
 
+function assertVersionToken(version: unknown): asserts version is string {
+  if (
+    typeof version !== "string" ||
+    version.trim().length === 0 ||
+    version.trim() === "*"
+  ) {
+    throw new TypeError(
+      'Version must be a non-empty opaque token other than "*".',
+    );
+  }
+}
+
+function cloneStoredRecord(record: StoredRecord): StoredRecord {
+  for (const value of Object.values(record)) {
+    if (typeof value === "number" && !Number.isFinite(value)) {
+      throw new TypeError("Stored record numbers must be finite.");
+    }
+  }
+  return structuredClone(record);
+}
+
 /** Partitions hold rows by id; a collection holds partitions by name. */
 type Partitions = Map<string, Map<string, StoredRow>>;
 
@@ -530,13 +551,13 @@ export function createMemoryStore(): Store {
 
       function versioned(row: StoredRow): VersionedRecord<T> {
         return {
-          value: codec.decode(row.record),
+          value: codec.decode(cloneStoredRecord(row.record)),
           version: String(row.version),
         };
       }
 
       function write(key: EntityKey, value: T): T {
-        const record = codec.encode(value);
+        const record = cloneStoredRecord(codec.encode(value));
         versionGeneration += 1n;
         upsertMap(
           partitions,
@@ -545,7 +566,7 @@ export function createMemoryStore(): Store {
         ).set(key.id, { record, version: versionGeneration });
         // Decode what was stored rather than echoing the input, so callers see
         // the same value a later `get` would return.
-        return codec.decode(record);
+        return codec.decode(cloneStoredRecord(record));
       }
 
       function dropIfEmpty(partition: string): void {
@@ -557,7 +578,9 @@ export function createMemoryStore(): Store {
       return {
         async get(key) {
           const row = read(key);
-          return row === undefined ? null : codec.decode(row.record);
+          return row === undefined
+            ? null
+            : codec.decode(cloneStoredRecord(row.record));
         },
 
         async getVersioned(key) {
@@ -569,7 +592,10 @@ export function createMemoryStore(): Store {
           const key = definition.key(value);
           const existing = read(key);
           if (existing !== undefined) {
-            return { inserted: false, value: codec.decode(existing.record) };
+            return {
+              inserted: false,
+              value: codec.decode(cloneStoredRecord(existing.record)),
+            };
           }
           return { inserted: true, value: write(key, value) };
         },
@@ -580,6 +606,7 @@ export function createMemoryStore(): Store {
         },
 
         async putIfUnchanged(value, version) {
+          assertVersionToken(version);
           const key = definition.key(value);
           const row = read(key);
           if (row === undefined || String(row.version) !== version) {
@@ -595,7 +622,9 @@ export function createMemoryStore(): Store {
           for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
             const before = read(key);
             const current =
-              before === undefined ? null : codec.decode(before.record);
+              before === undefined
+                ? null
+                : codec.decode(cloneStoredRecord(before.record));
             const decision = await decide(current);
 
             if (decision.action === "keep") {
@@ -620,7 +649,9 @@ export function createMemoryStore(): Store {
           const rows = partitions.get(partition);
           return rows === undefined
             ? []
-            : [...rows.values()].map((row) => codec.decode(row.record));
+            : [...rows.values()].map((row) =>
+                codec.decode(cloneStoredRecord(row.record)),
+              );
         },
 
         async listVersioned(partition) {
@@ -676,6 +707,7 @@ export function createMemoryStore(): Store {
         },
 
         async deleteIfUnchanged(key, version) {
+          assertVersionToken(version);
           const row = read(key);
           if (row === undefined || String(row.version) !== version) {
             return false;
@@ -687,6 +719,11 @@ export function createMemoryStore(): Store {
         },
 
         async transact(partition, actions) {
+          for (const step of actions) {
+            if (step.action === "putIfUnchanged") {
+              assertVersionToken(step.version);
+            }
+          }
           const keys = actions.map((step) =>
             step.action === "delete" ? step.key : definition.key(step.value),
           );

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { defineCollection, type CollectionStore } from "@pegma/storage-core";
@@ -95,6 +96,16 @@ describe("DynamoDB Local pin", () => {
       .update(readFileSync(tarball))
       .digest("hex");
     expect(digest).toBe(DYNAMODB_LOCAL_TARBALL_SHA256);
+  });
+
+  it("stages a regular file in a private directory", () => {
+    const tarball = dynamoDbLocalTarballPath();
+    const details = lstatSync(tarball);
+    expect(details.isFile()).toBe(true);
+    expect(details.isSymbolicLink()).toBe(false);
+    if (process.platform !== "win32") {
+      expect(statSync(dirname(tarball)).mode & 0o077).toBe(0);
+    }
   });
 });
 

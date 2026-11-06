@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -12,12 +13,14 @@ import { describe, expect, it } from "vitest";
 import {
   RELEASE_PACKAGES,
   decidePublication,
+  isolatedNpmEnvironment,
   lockVersionSatisfiesSpecifier,
   parseArguments,
   parsePnpmLockfileImporters,
   validateLockImporter,
   validateReleaseTag,
   validateRepository,
+  verifyReleaseInventory,
 } from "../scripts/release-packages.mjs";
 
 const git = process.platform === "win32" ? "git.exe" : "git";
@@ -41,6 +44,13 @@ function run(command: string, arguments_: string[], cwd?: string): string {
 describe("release package metadata", () => {
   it("accepts npm's cross-platform argument separator", () => {
     expect(parseArguments(["--", "--output", ".release"])).toEqual({
+      output: ".release",
+    });
+  });
+
+  it("supports packing before a separate smoke run", () => {
+    expect(parseArguments(["--skip-smoke", "--output", ".release"])).toEqual({
+      skipSmoke: true,
       output: ".release",
     });
   });
@@ -312,20 +322,20 @@ describe("release source authentication", () => {
       run(git, ["config", "user.signingkey", signingKey], root);
       run(git, ["config", "gpg.ssh.allowedSignersFile", allowedSigners], root);
 
-      run(git, ["tag", "--sign", "v0.0.0", "--message", "signed"], root);
+      run(git, ["tag", "--sign", "v0.1.0", "--message", "signed"], root);
       expect(
         validateReleaseTag({
           root,
-          releaseTag: "v0.0.0",
+          releaseTag: "v0.1.0",
           expectedReleaseCommit: releaseCommit,
         }),
-      ).toEqual({ headCommit: releaseCommit, releaseTag: "v0.0.0" });
+      ).toEqual({ headCommit: releaseCommit, releaseTag: "v0.1.0" });
 
-      run(git, ["tag", "v0.0.1"], root);
+      run(git, ["tag", "v0.1.1"], root);
       expect(() =>
         validateReleaseTag({
           root,
-          releaseTag: "v0.0.1",
+          releaseTag: "v0.1.1",
           expectedReleaseCommit: releaseCommit,
         }),
       ).toThrow("annotated tag object");
@@ -337,7 +347,7 @@ describe("release source authentication", () => {
           "commit.gpgsign=false",
           "tag",
           "--annotate",
-          "v0.0.2",
+          "v0.1.2",
           "--message",
           "unsigned",
         ],
@@ -346,7 +356,7 @@ describe("release source authentication", () => {
       expect(() =>
         validateReleaseTag({
           root,
-          releaseTag: "v0.0.2",
+          releaseTag: "v0.1.2",
           expectedReleaseCommit: releaseCommit,
         }),
       ).toThrow("not valid for an approved signer");
@@ -373,16 +383,104 @@ describe("release source authentication", () => {
     const prepare = jobs.slice(prepareStart, publishStart);
     const publish = jobs.slice(publishStart);
     expect(prepare).not.toContain("id-token: write");
-    expect(prepare).toContain("npm@11.18.0");
+    expect(prepare).toContain("--skip-smoke");
+    expect(prepare).toContain("include-hidden-files: false");
     expect(publish).toContain("id-token: write");
     expect(publish).not.toContain("npm ci");
     expect(publish).not.toContain("npm install");
     expect(publish).not.toContain("pnpm install");
     expect(publish).not.toContain("corepack");
     expect(publish).not.toContain("pnpm");
-    expect(publish).toContain("scripts/release-packages.mjs publish");
+    expect(publish).not.toContain("actions/checkout");
+    expect(publish).not.toContain("scripts/release-packages.mjs");
+    expect(publish).toContain('"--ignore-scripts"');
     expect(workflow).not.toContain("workflow_dispatch");
     expect(workflow).toContain("retention-days: 30");
+  });
+});
+
+describe("prepared release files", () => {
+  function preparedDirectory(): {
+    readonly root: string;
+    readonly manifestPath: string;
+  } {
+    const root = mkdtempSync(join(tmpdir(), "pegma-release-files-"));
+    const packages = [
+      "pegma-storage-core-0.4.0.tgz",
+      "pegma-storage-azure-tables-0.4.0.tgz",
+      "pegma-storage-cloudflare-d1-0.4.1.tgz",
+      "pegma-storage-dynamodb-0.4.2.tgz",
+    ].map((tarball) => ({ tarball }));
+    for (const { tarball } of packages) {
+      writeFileSync(join(root, tarball), tarball);
+    }
+    const manifestPath = join(root, "package-manifest.json");
+    writeFileSync(manifestPath, JSON.stringify({ packages }));
+    return { root, manifestPath };
+  }
+
+  it("accepts exactly the manifest and four regular tarballs", async () => {
+    const { root, manifestPath } = preparedDirectory();
+    try {
+      const manifest = (await verifyReleaseInventory(manifestPath)) as {
+        packages: unknown[];
+      };
+      expect(manifest.packages).toHaveLength(4);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects extra files and directories", async () => {
+    const first = preparedDirectory();
+    try {
+      writeFileSync(join(first.root, "extra.txt"), "extra");
+      await expect(verifyReleaseInventory(first.manifestPath)).rejects.toThrow(
+        /inventory/,
+      );
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+
+    const second = preparedDirectory();
+    try {
+      mkdirSync(join(second.root, "nested"));
+      await expect(verifyReleaseInventory(second.manifestPath)).rejects.toThrow(
+        /inventory/,
+      );
+    } finally {
+      rmSync(second.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps workflow identity variables and replaces npm configuration", () => {
+    const selected = isolatedNpmEnvironment(
+      {
+        PATH: "bin",
+        HOME: "home",
+        CI: "1",
+        GITHUB_ACTIONS: "true",
+        ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.invalid",
+        NPM_TOKEN: "not-kept",
+        NODE_AUTH_TOKEN: "not-kept",
+        NODE_OPTIONS: "not-kept",
+        NODE_EXTRA_CA_CERTS: "not-kept",
+        HTTPS_PROXY: "not-kept",
+        npm_config_registry: "not-kept",
+      },
+      "/private/userconfig",
+      "/private/globalconfig",
+    );
+
+    expect(selected).toEqual({
+      PATH: "bin",
+      HOME: "home",
+      CI: "1",
+      GITHUB_ACTIONS: "true",
+      ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.invalid",
+      NPM_CONFIG_USERCONFIG: "/private/userconfig",
+      NPM_CONFIG_GLOBALCONFIG: "/private/globalconfig",
+    });
   });
 });
 
