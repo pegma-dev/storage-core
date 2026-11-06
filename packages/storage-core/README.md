@@ -91,9 +91,9 @@ const ok = await collection.putIfUnchanged(revoked, callerSuppliedVersion);
 ```
 
 Conditional versions must be strings containing a non-whitespace character.
-The `*` wildcard is reserved and is rejected, as are empty and non-string
-values. Invalid tokens throw `TypeError`; valid tokens that no longer match
-return `false`.
+A token whose trimmed value is `*` is reserved and rejected, as are empty and
+non-string values. Invalid tokens throw `TypeError`; valid tokens that no
+longer match return `false`.
 
 ## Changing several records together
 

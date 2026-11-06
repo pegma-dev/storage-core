@@ -207,8 +207,9 @@ export interface CollectionStore<T> {
    * and handed back by the caller, which `update` cannot express because its
    * decider sees the record but never the version.
    *
-   * The version must be a string containing a non-whitespace character. `*`
-   * is reserved and is rejected. Invalid tokens throw {@link TypeError}.
+   * The version must be a string containing a non-whitespace character. A
+   * token whose trimmed value is `*` is reserved and rejected. Invalid tokens
+   * throw {@link TypeError}.
    */
   putIfUnchanged(value: T, version: string): Promise<boolean>;
 
@@ -258,8 +259,9 @@ export interface CollectionStore<T> {
    * false if the record changed or is already gone, both of which mean "leave
    * it alone" rather than "something went wrong".
    *
-   * The version must be a string containing a non-whitespace character. `*`
-   * is reserved and is rejected. Invalid tokens throw {@link TypeError}.
+   * The version must be a string containing a non-whitespace character. A
+   * token whose trimmed value is `*` is reserved and rejected. Invalid tokens
+   * throw {@link TypeError}.
    */
   deleteIfUnchanged(key: EntityKey, version: string): Promise<boolean>;
 
