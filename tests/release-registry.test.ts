@@ -1269,7 +1269,7 @@ async function pipelineFixture() {
             kind: "source",
             repository: "pegma-dev/storage-core",
             gitCommit: gitRun(["rev-parse", "HEAD"]),
-            releaseTag: "v0.4.3",
+            releaseTag: `v${metadata.version}`,
             directory: basename(directory),
           },
         };
@@ -1513,7 +1513,7 @@ function enableUnqualifiedRegistryOnlyStub(
   expect(selected).toHaveLength(1);
   const record = selected[0]!;
   expect(record.name).toBe("@pegma/storage-dynamodb");
-  expect(manifest.releaseTag).toBe("v0.4.3");
+  expect(manifest.releaseTag).toBe(`v${record.version}`);
   const bundle = JSON.parse(
     fixture("core040-slsa.json").toString("utf8"),
   ) as BundleFixture;
@@ -1651,11 +1651,17 @@ async function controlledPrepare(
   vi.stubGlobal("fetch", f.seams.fetch);
   try {
     const { prepareRelease } = await import("../scripts/release-packages.mjs");
+    const metadata = JSON.parse(
+      readFileSync(
+        join(f.root, "packages", "storage-dynamodb", "package.json"),
+        "utf8",
+      ),
+    ) as { version: string };
     return await withoutExplicitNpm(() =>
       prepareRelease({
         root: f.root,
         requireClean: true,
-        releaseTag: "v0.4.3",
+        releaseTag: `v${metadata.version}`,
         ...(skipSmoke ? { skipSmoke: true } : {}),
         ...(output === undefined ? {} : { output }),
       }),

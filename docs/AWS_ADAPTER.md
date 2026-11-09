@@ -4,11 +4,13 @@
 
 The runtime adapter is implemented in this repository. It qualifies when every
 conformance case passes against **Amazon DynamoDB Local** and the release gates
-are satisfied. `@pegma/storage-dynamodb@0.4.3` is the unpublished first trusted
-runtime candidate. Version `0.4.2` is reserved for a separately reviewed,
+are satisfied. `@pegma/storage-dynamodb@0.4.4` is the unpublished first trusted
+runtime candidate. Version `0.4.2` was published as a separately reviewed,
 metadata-only registration archive: it contains no runtime, exports, scripts or
-dependencies, is not an SDK, and must never be a host input. Registration and
-runtime publication remain pending until their actual registry evidence exists.
+dependencies, is not an SDK, and must never be a host input. The `v0.4.3` release
+attempt failed before preparation, producing no runtime archive or publication.
+Its signed tag remains immutable; retain the release as a failed attempt.
+Runtime qualification remains pending.
 
 Decided 2026-09-11. This is the assignment record for Storage Core's third
 real adapter — read `AGENTS.md` first; its hard rules govern everything here.
@@ -78,17 +80,18 @@ Node 22 + 24.
 
 The port is unchanged, so `@pegma/storage-core` stays at `0.4.0` and the runtime
 candidate pins it exactly. `0.4.2` is registration-only metadata under `bootstrap`,
-not a usable adapter release. The first trusted runtime candidate is `0.4.3`;
+not a usable adapter release. The first trusted runtime candidate is `0.4.4`;
 its publication requires the reviewed signed-source and trusted-publisher flow.
-Existing repository-wide tags `v0.4.0` and `v0.4.1` must never be reused.
+Existing repository-wide tags `v0.4.0`, `v0.4.1` and failed `v0.4.3` must never
+be reused. The later D1 feature is planned as `0.4.5`, after its own review.
 
 Unprivileged validation runs the full gates on Node 22 and 24 before preparation.
 Preparation depends on that validation and signed-release identity checks; it
 packs only selected source packages and retains the independently pinned exact
 original registry archives for unselected packages. Only the minimal publish job
 receives OIDC authority. See [RELEASING.md](RELEASING.md) for the separate
-registration exception and runtime release procedure; this document records no
-completed registration or runtime publication.
+registration exception and runtime release procedure. Published metadata
+registration does not qualify a runtime, which remains unpublished.
 
 ## What it unblocks
 

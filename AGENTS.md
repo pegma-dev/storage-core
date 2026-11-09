@@ -78,9 +78,10 @@ packages. Only the minimal publish job receives OIDC authority.
 Publication is integrity-checked, retry-safe, and
 dependency-ordered. See `docs/RELEASING.md`.
 
-The sole registration exception is a separately reviewed, metadata-only first
-`@pegma/storage-dynamodb@0.4.2` archive under `bootstrap`, which may be published
-only by the maintainer with interactive 2FA. It contains no runtime, exports, scripts or
+The sole registration exception was the separately reviewed, metadata-only
+`@pegma/storage-dynamodb@0.4.2` archive published under `bootstrap`. That exception
+requires maintainer interactive 2FA; it authorizes no runtime publication.
+The archive contains no runtime, exports, scripts or
 dependencies, is not an SDK/release qualification, and is never a host input.
 Actual runtime publication remains trusted-publisher only.
 
@@ -94,10 +95,13 @@ published code or substitute them for the pinned Core `0.4.0` runtime/error clas
 All four packages are in this repository. `@pegma/storage-core` and
 `@pegma/storage-azure-tables` are published at `0.4.0`,
 `@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness
-patch of its own. DynamoDB `0.4.2` is reserved for registration-only metadata;
-`@pegma/storage-dynamodb@0.4.3` is the unpublished first trusted AWS runtime
-candidate (see `docs/AWS_ADAPTER.md` and `docs/RELEASING.md`). Do not claim
-registration or release before its actual registry evidence. The port offers keyed access,
+patch of its own. DynamoDB `0.4.2` is published registration-only metadata.
+The `v0.4.3` attempt failed before preparation, with no runtime archive or
+publication. Its signed tag remains immutable; retain its release as a failure.
+`@pegma/storage-dynamodb@0.4.4` is the unpublished first trusted
+AWS runtime candidate (see `docs/AWS_ADAPTER.md` and `docs/RELEASING.md`).
+The later D1 feature is planned as `0.4.5`. Do not claim runtime release before
+its actual registry qualification. The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.

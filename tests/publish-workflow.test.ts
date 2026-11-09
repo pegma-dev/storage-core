@@ -1,6 +1,15 @@
-import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { dirname, join, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const workflow = (
@@ -46,7 +55,380 @@ function inlinePublisher(): string {
     .join("\n");
 }
 
+function shellStep(job: string, name: string): string {
+  const step = workflowStep(workflowJob(job), name);
+  const marker = "        run: |\n";
+  const start = step.indexOf(marker);
+  if (start === -1) throw new Error(`Shell body for ${name} was not found.`);
+  const lines = step
+    .slice(start + marker.length)
+    .trimEnd()
+    .split("\n");
+  if (lines.some((line) => line.length > 0 && !line.startsWith("          ")))
+    throw new Error(`Unexpected shell indentation in ${name}.`);
+  return lines.map((line) => line.replace(/^ {10}/u, "")).join("\n");
+}
+
+function gitBashFromExecPath(output: string): string {
+  const execPath = output.trim();
+  if (!win32.isAbsolute(execPath) || /[\r\n]/u.test(execPath))
+    throw new Error(
+      "Git for Windows returned an invalid executable directory.",
+    );
+  return win32.resolve(execPath, "..", "..", "..", "bin", "bash.exe");
+}
+
+async function bootstrapBash(): Promise<string> {
+  if (process.platform !== "win32") return "/bin/bash";
+  let output: string;
+  try {
+    output = execFileSync("git.exe", ["--exec-path"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 64 * 1024,
+    });
+  } catch {
+    throw new Error(
+      "Git for Windows is required to run the workflow shell tests.",
+    );
+  }
+  const path = gitBashFromExecPath(output);
+  if (!(await stat(path).catch(() => undefined))?.isFile())
+    throw new Error(`Git Bash was not found beside Git for Windows: ${path}`);
+  return path;
+}
+
+function bashPath(path: string): string {
+  if (process.platform !== "win32") return path;
+  return path
+    .replace(/\\/gu, "/")
+    .replace(
+      /^([a-z]):\//iu,
+      (_match, drive: string) => `/${drive.toLowerCase()}/`,
+    );
+}
+
+function shellQuote(value: string): string {
+  return "'" + value.replaceAll("'", "'\"'\"'") + "'";
+}
+
+const bootstrapJobs = ["prepare", "publish"] as const;
+const probeArguments = [
+  "--fixture-probe",
+  "argument with spaces",
+  "single'and\"double",
+  "$(must-not-execute)",
+  "semicolon;literal",
+];
+type BootstrapMode =
+  | "success"
+  | "download"
+  | "digest"
+  | "extract"
+  | "missing-cli"
+  | "relative-node";
+interface BootstrapTrace {
+  readonly kind: string;
+  readonly args?: readonly string[];
+}
+
+async function runReviewedNpmBootstrap(job: string, mode: BootstrapMode) {
+  const root = await mkdtemp(join(tmpdir(), "storage-reviewed-npm-"));
+  const runner = join(root, "runner with spaces");
+  const fixture = join(root, "synthetic archive with spaces");
+  const hostBin = join(root, "host bin");
+  const githubPath = join(root, "github-path");
+  const tracePath = join(root, "trace.jsonl");
+  const digestInput = join(root, "digest-input");
+  try {
+    await Promise.all([
+      mkdir(runner),
+      mkdir(join(fixture, "package", "bin"), { recursive: true }),
+      mkdir(hostBin),
+      mkdir(join(root, "relative")),
+    ]);
+    const hostNpm = `#!/bin/bash
+printf '%s\\n' '{"kind":"host"}' >> "$TEST_TRACE"
+printf '%s\\n' '11.16.0'
+`;
+    const stockNpm = hostNpm.replace('"host"', '"stock-wrapper"');
+    await Promise.all([
+      writeFile(join(hostBin, "npm"), hostNpm),
+      writeFile(join(root, "relative", "node"), "#!/bin/bash\nexit 0\n"),
+      writeFile(join(fixture, "package", "bin", "npm"), stockNpm),
+      writeFile(join(fixture, "package", "package.json"), '{"type":"module"}'),
+      writeFile(githubPath, ""),
+      writeFile(tracePath, ""),
+      writeFile(digestInput, ""),
+    ]);
+    await Promise.all([
+      chmod(join(hostBin, "npm"), 0o700),
+      chmod(join(root, "relative", "node"), 0o700),
+      chmod(join(fixture, "package", "bin", "npm"), 0o700),
+    ]);
+    if (mode !== "missing-cli")
+      await writeFile(
+        join(fixture, "package", "bin", "npm-cli.js"),
+        `import {appendFileSync} from "node:fs";
+const args=process.argv.slice(2);
+appendFileSync(process.env.TEST_TRACE_NATIVE,JSON.stringify({kind:"owned",args})+"\\n");
+process.stdout.write(args.length===1&&args[0]==="--version"?"11.18.0\\n":JSON.stringify(args)+"\\n");
+`,
+      );
+
+    // Only shell control flow and actual launcher selection are under test.
+    // Download, digest verification and extraction are explicitly controlled
+    // external ports; these synthetic bytes are NOT a real npm/crypto proof.
+    const controlledTools = `
+command() {
+  if [[ "$TEST_MODE" == 'relative-node' && "$#" == 2 && "$1" == '-v' && "$2" == 'node' ]]; then
+    printf '%s\\n' 'relative/node'
+    return 0
+  fi
+  builtin command "$@"
+}
+curl() {
+  printf '%s\\n' '{"kind":"download"}' >> "$TEST_TRACE"
+  local output='' url='' proto='' proxy='unset' max_time='' max_size=''
+  local disabled=false fail=false silent=false show_error=false
+  [[ "$1" == '--disable' ]] || return 91
+  while (( $# )); do
+    case "$1" in
+      --disable) disabled=true; shift ;;
+      --fail) fail=true; shift ;;
+      --silent) silent=true; shift ;;
+      --show-error) show_error=true; shift ;;
+      --proto) proto="$2"; shift 2 ;;
+      --proxy) proxy="$2"; shift 2 ;;
+      --max-time) max_time="$2"; shift 2 ;;
+      --max-filesize) max_size="$2"; shift 2 ;;
+      --output) output="$2"; shift 2 ;;
+      https://*) url="$1"; shift ;;
+      *) return 91 ;;
+    esac
+  done
+  [[ "$disabled" == true && "$fail" == true && "$silent" == true && "$show_error" == true ]] || return 91
+  [[ "$proto" == '=https' && "$proxy" == '' && "$max_time" == 60 && "$max_size" == 16777216 ]] || return 91
+  [[ "$url" == 'https://registry.npmjs.org/npm/-/npm-11.18.0.tgz' && -n "$output" ]] || return 91
+  if [[ "$TEST_MODE" == 'download' ]]; then return 31; fi
+  printf '%s' 'synthetic archive bytes, not real npm' > "$output"
+}
+sha256sum() {
+  printf '%s\\n' '{"kind":"digest"}' >> "$TEST_TRACE"
+  local checksum
+  IFS= read -r checksum
+  printf '%s\\n' "$checksum" > "$TEST_DIGEST_INPUT"
+  [[ "$#" == 2 && "$1" == '--check' && "$2" == '--status' ]] || return 92
+  [[ "$checksum" == '73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e  '* ]] || return 93
+  if [[ "$TEST_MODE" == 'digest' ]]; then return 32; fi
+}
+tar() {
+  printf '%s\\n' '{"kind":"extract"}' >> "$TEST_TRACE"
+  local archive='' destination=''
+  local extract=false gzip=false no_owner=false no_permissions=false
+  while (( $# )); do
+    case "$1" in
+      --extract) extract=true; shift ;;
+      --gzip) gzip=true; shift ;;
+      --file) archive="$2"; shift 2 ;;
+      --directory) destination="$2"; shift 2 ;;
+      --no-same-owner) no_owner=true; shift ;;
+      --no-same-permissions) no_permissions=true; shift ;;
+      *) return 94 ;;
+    esac
+  done
+  [[ "$extract" == true && "$gzip" == true && "$no_owner" == true && "$no_permissions" == true ]] || return 94
+  [[ -s "$archive" && -n "$destination" ]] || return 94
+  if [[ "$TEST_MODE" == 'extract' ]]; then return 33; fi
+  cp -R -- "$TEST_ARCHIVE_FIXTURE/package" "$destination/package"
+}
+`;
+    const version = /^  REVIEWED_NPM_VERSION: "([^"]+)"$/mu.exec(workflow)?.[1];
+    if (version === undefined)
+      throw new Error("Reviewed npm version was not found.");
+    const script = `set -euo pipefail
+${controlledTools}
+printf 'HOST_VERSION='
+npm --version
+if [[ "$TEST_MODE" == 'relative-node' ]]; then
+  [[ -f relative/node && -x relative/node ]] || exit 95
+fi
+${shellStep(job, "Bootstrap the reviewed npm CLI")}
+IFS= read -r reviewed_bin < "$GITHUB_PATH"
+export PATH="$reviewed_bin:$PATH"
+hash -r
+${shellStep(job, "Check the npm version")}
+printf 'OWNED_ARGUMENTS='
+npm ${probeArguments.map(shellQuote).join(" ")}
+`;
+    const result = spawnSync(
+      await bootstrapBash(),
+      ["--noprofile", "--norc", "-c", script],
+      {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 10_000,
+        maxBuffer: 256 * 1024,
+        env: {
+          PATH: `${bashPath(hostBin)}:${bashPath(dirname(process.execPath))}:/usr/bin:/bin`,
+          HOME: bashPath(root),
+          RUNNER_TEMP: bashPath(runner),
+          GITHUB_PATH: bashPath(githubPath),
+          REVIEWED_NPM_VERSION: version,
+          TEST_MODE: mode,
+          TEST_TRACE: bashPath(tracePath),
+          TEST_TRACE_NATIVE: tracePath,
+          TEST_DIGEST_INPUT: bashPath(digestInput),
+          TEST_ARCHIVE_FIXTURE: bashPath(fixture),
+          SystemRoot: process.env.SystemRoot,
+          TEMP: root,
+          TMP: root,
+        },
+      },
+    );
+    const trace = (await readFile(tracePath, "utf8"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as BootstrapTrace);
+    return {
+      result,
+      trace,
+      path: await readFile(githubPath, "utf8"),
+      digestInput: await readFile(digestInput, "utf8"),
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 describe("publish workflow", () => {
+  it.each([
+    {
+      execPath: String.raw`C:\Program Files\Git\mingw64\libexec\git-core`,
+      bash: String.raw`C:\Program Files\Git\bin\bash.exe`,
+    },
+    {
+      execPath: String.raw`D:\developer tools\Git\mingw64\libexec\git-core`,
+      bash: String.raw`D:\developer tools\Git\bin\bash.exe`,
+    },
+    {
+      execPath: "E:/scoop/apps/git/current/mingw64/libexec/git-core\n",
+      bash: String.raw`E:\scoop\apps\git\current\bin\bash.exe`,
+    },
+  ])(
+    "resolves Git Bash beside the actual Git installation: $execPath",
+    ({ execPath, bash }) => {
+      expect(gitBashFromExecPath(execPath)).toBe(bash);
+    },
+  );
+
+  it("keeps the actual preparation and publishing bootstrap shell bodies identical", () => {
+    expect(shellStep("prepare", "Bootstrap the reviewed npm CLI")).toBe(
+      shellStep("publish", "Bootstrap the reviewed npm CLI"),
+    );
+  });
+
+  it.each(bootstrapJobs)(
+    "%s bootstraps reviewed npm after Node setup and before version checks or consumers",
+    (name) => {
+      const job = workflowJob(name);
+      const setup = job.indexOf("      - name: Set up Node.js\n");
+      const bootstrap = job.indexOf(
+        "      - name: Bootstrap the reviewed npm CLI\n",
+      );
+      const check = job.indexOf("      - name: Check the npm version\n");
+      const consumer = job.indexOf(
+        name === "prepare"
+          ? "      - name: Pack the release files\n"
+          : "      - name: Verify and publish the prepared release\n",
+      );
+      expect(setup).toBeGreaterThanOrEqual(0);
+      expect(bootstrap).toBeGreaterThan(setup);
+      expect(check).toBeGreaterThan(bootstrap);
+      expect(consumer).toBeGreaterThan(check);
+    },
+  );
+
+  it.each(bootstrapJobs)(
+    "%s actual shell selects the owned reviewed CLI over host npm 11.16 and preserves literal arguments",
+    async (job) => {
+      const f = await runReviewedNpmBootstrap(job, "success");
+      expect(f.result.error).toBeUndefined();
+      expect(f.result.signal).toBeNull();
+      expect(f.result.status, f.result.stderr).toBe(0);
+      expect(f.result.stdout).toContain("HOST_VERSION=11.16.0\n");
+      expect(f.result.stdout).toContain(
+        "OWNED_ARGUMENTS=" + JSON.stringify(probeArguments) + "\n",
+      );
+      expect(f.trace.map((entry) => entry.kind)).toEqual([
+        "host",
+        "download",
+        "digest",
+        "extract",
+        "owned",
+        "owned",
+      ]);
+      expect(
+        f.trace
+          .filter((entry) => entry.kind === "owned")
+          .map((entry) => entry.args),
+      ).toEqual([["--version"], probeArguments]);
+      expect(f.path.trim().split("\n")).toHaveLength(1);
+      expect(f.path.trim()).toMatch(/\/reviewed-npm\.[^/]+\/bin$/u);
+      expect(f.path).not.toContain("/package/bin");
+      expect(f.digestInput).toMatch(
+        /^73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e  .+\/npm-11\.18\.0\.tgz\n$/u,
+      );
+    },
+  );
+
+  it.each(
+    bootstrapJobs.flatMap((job) => [
+      {
+        job,
+        mode: "download" as const,
+        status: 31,
+        calls: ["host", "download"],
+      },
+      {
+        job,
+        mode: "digest" as const,
+        status: 32,
+        calls: ["host", "download", "digest"],
+      },
+      {
+        job,
+        mode: "extract" as const,
+        status: 33,
+        calls: ["host", "download", "digest", "extract"],
+      },
+      {
+        job,
+        mode: "missing-cli" as const,
+        status: 1,
+        calls: ["host", "download", "digest", "extract"],
+      },
+      {
+        job,
+        mode: "relative-node" as const,
+        status: 1,
+        calls: ["host"],
+      },
+    ]),
+  )(
+    "$job actual bootstrap stops on $mode failure without publishing PATH or falling back to host npm",
+    async ({ job, mode, status, calls }) => {
+      const f = await runReviewedNpmBootstrap(job, mode);
+      expect(f.result.error).toBeUndefined();
+      expect(f.result.signal).toBeNull();
+      expect(f.result.status, f.result.stderr).toBe(status);
+      expect(f.result.stdout).toContain("HOST_VERSION=11.16.0\n");
+      expect(f.result.stdout).not.toContain("OWNED_ARGUMENTS=");
+      expect(f.trace.map((entry) => entry.kind)).toEqual(calls);
+      expect(f.path).toBe("");
+    },
+  );
+
   it.each([
     { outcome: "success", reuseRequired: "false", upload: false },
     { outcome: "success", reuseRequired: "true", upload: true },
