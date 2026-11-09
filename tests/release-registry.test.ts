@@ -28,6 +28,7 @@ import {
   loadReusePolicy,
   preflightRegistry,
   registryReuseOrigin,
+  runPublicConsumer,
   verifyProvenanceAudit,
   verifyPublishingJobs,
   verifyReusedPackages,
@@ -42,6 +43,31 @@ import type {
 
 const fixture = (name: string): Buffer =>
   readFileSync(new URL(`./fixtures/release-registry/${name}`, import.meta.url));
+const awsClient = {
+  name: "@aws-sdk/client-dynamodb",
+  version: "3.1130.0",
+  integrity:
+    "sha512-yPEc9TWLY1McM6xA9wlxA9rM0ZeS8RAeyi1t7rdHPNxq0TpyCDn6z651ccRJ1RrMU4k2aiVzNCaBYUZA4aaA/w==",
+  tarballUrl:
+    "https://registry.npmjs.org/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1130.0.tgz",
+  archiveSha256:
+    "b0f2cf96a293592e70a4b0cee40d0ef387c10b0cdc541b0c3fd99a8d4b753335",
+} as const;
+type AwsConsumerFault =
+  | "metadata-name"
+  | "metadata-version"
+  | "metadata-url"
+  | "metadata-integrity"
+  | "archive-bytes"
+  | "lock-missing"
+  | "lock-version"
+  | "lock-link"
+  | "lock-url"
+  | "lock-integrity"
+  | "installed-name"
+  | "installed-version"
+  | "installed-directory-link"
+  | "nested-version";
 const commit = "a".repeat(40);
 const identity = {
   gitCommit: commit,
@@ -1121,6 +1147,11 @@ describe("verified official npm tool selection", () => {
 async function pipelineFixture() {
   const historical = await historicalWriterFixture();
   const npmBytes = await officialNpmTool();
+  const awsBytes = fixture("aws-client-dynamodb-3.1130.0.tgz");
+  expect(digest(awsBytes)).toBe(awsClient.archiveSha256);
+  expect("sha512-" + digest(awsBytes, "sha512", "base64")).toBe(
+    awsClient.integrity,
+  );
   const root = mkdtempSync(
     join(realpathSync(tmpdir()), "storage-pipeline-test-"),
   );
@@ -1157,6 +1188,7 @@ async function pipelineFixture() {
     ]),
   );
   const calls: Array<{ command: string; args: readonly string[] }> = [];
+  const consumerEvents: string[] = [];
   const state = {
     auditFails: false,
     consumerFails: false,
@@ -1167,6 +1199,7 @@ async function pipelineFixture() {
     auditOutput: historical.audit as unknown,
     consumerDependencies: [] as Array<Record<string, string>>,
     afterConsumer: undefined as (() => void) | undefined,
+    awsFault: undefined as AwsConsumerFault | undefined,
   };
   const output = (stdout = "", status = 0) => ({
     pid: 0,
@@ -1255,8 +1288,10 @@ async function pipelineFixture() {
         const input = JSON.parse(
           readFileSync(join(cwd, "package.json"), "utf8"),
         );
-        if (input.name === "storage-public-consumer")
+        if (input.name === "storage-public-consumer") {
+          consumerEvents.push("consumer-install");
           state.consumerDependencies.push(structuredClone(input.dependencies));
+        }
         const packages: Record<string, unknown> = {};
         for (const record of records.values()) {
           if (!Object.hasOwn(input.dependencies, record.name)) continue;
@@ -1271,6 +1306,57 @@ async function pipelineFixture() {
                 ? "sha512-invalid"
                 : record.integrity,
           };
+        }
+        if (input.name === "storage-public-consumer") {
+          const sdkKey = "node_modules/" + awsClient.name;
+          const sdkLock = {
+            version:
+              state.awsFault === "lock-version"
+                ? "3.1131.0"
+                : awsClient.version,
+            resolved:
+              state.awsFault === "lock-url"
+                ? "https://unreviewed.invalid/client.tgz"
+                : awsClient.tarballUrl,
+            integrity:
+              state.awsFault === "lock-integrity"
+                ? "sha512-unreviewed"
+                : awsClient.integrity,
+            ...(state.awsFault === "lock-link" ? { link: true } : {}),
+          };
+          if (state.awsFault !== "lock-missing") packages[sdkKey] = sdkLock;
+          if (state.awsFault === "nested-version")
+            packages["node_modules/@pegma/storage-dynamodb/" + sdkKey] = {
+              ...sdkLock,
+              version: "3.1131.0",
+            };
+          const sdkDirectory = join(cwd, sdkKey);
+          mkdirSync(dirname(sdkDirectory), { recursive: true });
+          let actualSdkDirectory = sdkDirectory;
+          if (state.awsFault === "installed-directory-link") {
+            actualSdkDirectory = join(cwd, "controlled-linked-aws-client");
+            mkdirSync(actualSdkDirectory);
+            symlinkSync(
+              actualSdkDirectory,
+              sdkDirectory,
+              process.platform === "win32" ? "junction" : "dir",
+            );
+          } else mkdirSync(sdkDirectory);
+          // Controlled install metadata, not executable AWS SDK contents. The
+          // independent genuine archive admission is exercised separately.
+          writeFileSync(
+            join(actualSdkDirectory, "package.json"),
+            JSON.stringify({
+              name:
+                state.awsFault === "installed-name"
+                  ? "@aws-sdk/other-client"
+                  : awsClient.name,
+              version:
+                state.awsFault === "installed-version"
+                  ? "3.1131.0"
+                  : awsClient.version,
+            }),
+          );
         }
         writeFileSync(
           join(cwd, "package-lock.json"),
@@ -1288,6 +1374,7 @@ async function pipelineFixture() {
       command === process.execPath &&
       args.includes("--experimental-strip-types")
     ) {
+      consumerEvents.push("consumer-command");
       const source = readFileSync(join(cwd, "consumer.mjs"), "utf8");
       expect(source).toContain('from "@pegma/storage-core/conformance"');
       expect(source).toContain('from "@pegma/storage-dynamodb"');
@@ -1311,6 +1398,38 @@ async function pipelineFixture() {
   const fetch: typeof globalThis.fetch = async (url) => {
     const address = String(url);
     if (address === npmToolUrl) return new Response(new Uint8Array(npmBytes));
+    if (
+      address ===
+      REGISTRY + encodeURIComponent(awsClient.name) + "/" + awsClient.version
+    ) {
+      consumerEvents.push("aws-metadata");
+      return Response.json({
+        name:
+          state.awsFault === "metadata-name"
+            ? "@aws-sdk/other-client"
+            : awsClient.name,
+        version:
+          state.awsFault === "metadata-version"
+            ? "3.1131.0"
+            : awsClient.version,
+        dist: {
+          tarball:
+            state.awsFault === "metadata-url"
+              ? "https://unreviewed.invalid/client.tgz"
+              : awsClient.tarballUrl,
+          integrity:
+            state.awsFault === "metadata-integrity"
+              ? "sha512-unreviewed"
+              : awsClient.integrity,
+        },
+      });
+    }
+    if (address === awsClient.tarballUrl) {
+      consumerEvents.push("aws-archive");
+      const bytes = Buffer.from(awsBytes);
+      if (state.awsFault === "archive-bytes") bytes[0] = bytes[0]! ^ 1;
+      return new Response(new Uint8Array(bytes));
+    }
     if (historical.responses.has(address))
       return Response.json(historical.responses.get(address));
     for (const record of records.values()) {
@@ -1361,6 +1480,7 @@ async function pipelineFixture() {
     historical,
     state,
     calls,
+    consumerEvents,
     command,
     seams,
     gitRun,
@@ -1633,6 +1753,179 @@ async function actualInlinePublisher(
 }
 
 describe("controlled real release orchestration (not release qualification)", () => {
+  it("admits the genuine reviewed AWS archive and pins the direct consumer root without claiming runtime or crypto execution", async () => {
+    const f = await pipelineFixture();
+    try {
+      const prepared = await controlledPrepare(f);
+      const output = join(f.root, "reviewed-aws-consumer");
+      mkdirSync(output);
+      const eventsBefore = f.consumerEvents.length;
+      const result = await withoutExplicitNpm(() =>
+        runPublicConsumer(prepared.manifest, { output }, f.seams),
+      );
+      expect(f.consumerEvents.slice(eventsBefore)).toEqual([
+        "aws-metadata",
+        "aws-archive",
+        "consumer-install",
+        "consumer-command",
+      ]);
+      expect(result).toMatchObject({
+        qualification: "UNQUALIFIED_STUBS",
+        publicConsumerExecuted: false,
+        cryptographicVerificationExecuted: false,
+      });
+      expect(f.state.consumerDependencies.at(-1)?.[awsClient.name]).toBe(
+        awsClient.version,
+      );
+      const dynamo = prepared.manifest.packages.find(
+        ({ name }) => name === "@pegma/storage-dynamodb",
+      )!;
+      expect(
+        (dynamo.package.dependencies as Record<string, string>)[awsClient.name],
+      ).toBe("^3.1097.0");
+      const admittedArchive = readFileSync(
+        join(output, "consumer-aws-sdk.tgz"),
+      );
+      expect(admittedArchive).toEqual(
+        fixture("aws-client-dynamodb-3.1130.0.tgz"),
+      );
+      expect(digest(admittedArchive)).toBe(awsClient.archiveSha256);
+      const metadata = readFileSync(
+        join(output, "consumer-aws-sdk-metadata.json"),
+      );
+      expect(JSON.parse(metadata.toString("utf8"))).toEqual({
+        name: awsClient.name,
+        version: awsClient.version,
+        dist: { tarball: awsClient.tarballUrl, integrity: awsClient.integrity },
+      });
+      expect(
+        JSON.parse(
+          readFileSync(join(output, "consumer-aws-sdk-admission.json"), "utf8"),
+        ),
+      ).toEqual({
+        name: awsClient.name,
+        version: awsClient.version,
+        integrity: awsClient.integrity,
+        tarballUrl: awsClient.tarballUrl,
+        archiveSha256: awsClient.archiveSha256,
+        archiveBytes: admittedArchive.length,
+        metadataSha256: digest(metadata),
+        scope:
+          "Pinned direct consumer root only; no transitive or AWS provenance qualification",
+      });
+      const lock = JSON.parse(
+        readFileSync(join(output, "public-consumer-lock.json"), "utf8"),
+      );
+      expect(lock.packages["node_modules/" + awsClient.name]).toEqual({
+        version: awsClient.version,
+        resolved: awsClient.tarballUrl,
+        integrity: awsClient.integrity,
+      });
+      expect(f.calls.some(({ args }) => args[0] === "publish")).toBe(false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it.each([
+    {
+      fault: "metadata-name",
+      error: "reviewed consumer AWS SDK metadata differs",
+    },
+    {
+      fault: "metadata-version",
+      error: "reviewed consumer AWS SDK metadata differs",
+    },
+    {
+      fault: "metadata-url",
+      error: "reviewed consumer AWS SDK metadata differs",
+    },
+    {
+      fault: "metadata-integrity",
+      error: "reviewed consumer AWS SDK metadata differs",
+    },
+    {
+      fault: "archive-bytes",
+      error: "reviewed consumer AWS SDK archive differs",
+    },
+    { fault: "lock-missing", error: "public consumer AWS SDK root is missing" },
+    {
+      fault: "lock-version",
+      error: "public consumer resolved an unexpected AWS SDK",
+    },
+    {
+      fault: "lock-link",
+      error: "public consumer resolved an unexpected AWS SDK",
+    },
+    {
+      fault: "lock-url",
+      error: "public consumer resolved an unexpected AWS SDK",
+    },
+    {
+      fault: "lock-integrity",
+      error: "public consumer resolved an unexpected AWS SDK",
+    },
+    {
+      fault: "installed-name",
+      error: "public consumer AWS SDK file identity differs",
+    },
+    {
+      fault: "installed-version",
+      error: "public consumer AWS SDK file identity differs",
+    },
+    {
+      fault: "installed-directory-link",
+      error: "public consumer AWS SDK files have an unexpected origin",
+    },
+    {
+      fault: "nested-version",
+      error: "public consumer resolved an unexpected AWS SDK",
+    },
+  ] as const)(
+    "refuses $fault before any public consumer command",
+    async ({ fault, error }) => {
+      const f = await pipelineFixture();
+      try {
+        const prepared = await controlledPrepare(f);
+        const output = join(f.root, "refused-aws-" + fault);
+        mkdirSync(output);
+        f.state.awsFault = fault;
+        const eventsBefore = f.consumerEvents.length;
+        const callsBefore = f.calls.length;
+        await withoutExplicitNpm(async () => {
+          await expect(
+            runPublicConsumer(prepared.manifest, { output }, f.seams),
+          ).rejects.toThrow(error);
+        });
+        const beforeInstall =
+          fault.startsWith("metadata-") || fault === "archive-bytes";
+        const events = f.consumerEvents.slice(eventsBefore);
+        expect(events).toEqual(
+          fault.startsWith("metadata-")
+            ? ["aws-metadata"]
+            : beforeInstall
+              ? ["aws-metadata", "aws-archive"]
+              : ["aws-metadata", "aws-archive", "consumer-install"],
+        );
+        expect(
+          f.calls
+            .slice(callsBefore)
+            .filter(({ args }) => args[1] === "install"),
+        ).toHaveLength(beforeInstall ? 0 : 1);
+        expect(
+          f.calls
+            .slice(callsBefore)
+            .some(({ args }) => args.includes("--experimental-strip-types")),
+        ).toBe(false);
+        expect(existsSync(join(output, "public-consumer.stdout"))).toBe(false);
+        expect(existsSync(join(output, "verification.json"))).toBe(false);
+      } finally {
+        rmSync(f.root, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
+
   it("preserves prior evidence on retry and accepts a separately fresh output namespace", async () => {
     const f = await pipelineFixture();
     const fresh = f.root + "-fresh-output";
@@ -1815,10 +2108,11 @@ describe("controlled real release orchestration (not release qualification)", ()
             version,
           ]),
         ),
-        "@aws-sdk/client-dynamodb": (
-          dynamo.package.dependencies as Record<string, string>
-        )["@aws-sdk/client-dynamodb"],
+        "@aws-sdk/client-dynamodb": awsClient.version,
       });
+      expect(
+        (dynamo.package.dependencies as Record<string, string>)[awsClient.name],
+      ).toBe("^3.1097.0");
       expect(
         f.calls
           .slice(callsBefore)
@@ -1834,6 +2128,11 @@ describe("controlled real release orchestration (not release qualification)", ()
           integrity: record.integrity,
           resolved: canonicalTarball(record),
         });
+      expect(consumerLock.packages["node_modules/" + awsClient.name]).toEqual({
+        version: awsClient.version,
+        resolved: awsClient.tarballUrl,
+        integrity: awsClient.integrity,
+      });
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

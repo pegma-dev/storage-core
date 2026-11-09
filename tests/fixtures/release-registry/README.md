@@ -20,3 +20,21 @@ Additional genuine SLSA parser fixtures (only the unique SLSA entry is retained)
 | d1041-slsa.json    | https://registry.npmjs.org/-/npm/v1/attestations/@pegma%2fstorage-cloudflare-d1@0.4.1 | 3636da27527d535e6afdd31df0bd6718233d6faba7f507db4b9cd04ebdeeb4b1 |
 
 Signed base64 payload, certificate and transparency values are preserved unchanged. No auth headers, tokens or local paths are included. Controlled orchestration tests can present these genuine entries as scripted npm audit output to exercise downstream decisions, but that scripted command output is not an actual cryptographic verification or release qualification. The separate real Linux npm audit and public consumer gates remain mandatory.
+
+## Reviewed AWS consumer root archive
+
+`aws-client-dynamodb-3.1130.0.tgz` is the genuine 249176-byte public archive from
+https://registry.npmjs.org/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1130.0.tgz.
+Its SHA256 is `b0f2cf96a293592e70a4b0cee40d0ef387c10b0cdc541b0c3fd99a8d4b753335`
+and SHA512 SRI is
+`sha512-yPEc9TWLY1McM6xA9wlxA9rM0ZeS8RAeyi1t7rdHPNxq0TpyCDn6z651ccRJ1RrMU4k2aiVzNCaBYUZA4aaA/w==`.
+The exact version and SRI match the preexisting reviewed `pnpm-lock.yaml`.
+The vendor archive retains its own Apache-2.0 license; the three Pegma MIT
+archives and their total above are unchanged.
+
+Tests supply these unchanged vendor bytes through the existing fetch seam to
+exercise the real consumer admission and refusal paths. Scripted npm installs
+write controlled lock and package metadata, and the consumer command remains an
+explicit `UNQUALIFIED_STUBS` observation. These tests do not execute AWS code,
+authenticate AWS provenance or qualify transitive dependencies. Genuine npm
+verification and the real public consumer/backend release gates remain separate.

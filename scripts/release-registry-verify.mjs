@@ -27,6 +27,17 @@ const npmArchiveUrl = "https://registry.npmjs.org/npm/-/npm-11.18.0.tgz";
 const npmArchiveSha256 =
   "73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e";
 const maximumTarBytes = 4 * 1024 * 1024;
+// The release consumer's direct SDK root is bound to the reviewed pnpm lock,
+// independently of the adapter's supported runtime range. Transitives are not
+// claimed reproducible, and this pin does not claim AWS SLSA provenance.
+const consumerAwsSdk = {
+  name: "@aws-sdk/client-dynamodb",
+  version: "3.1130.0",
+  integrity:
+    "sha512-yPEc9TWLY1McM6xA9wlxA9rM0ZeS8RAeyi1t7rdHPNxq0TpyCDn6z651ccRJ1RrMU4k2aiVzNCaBYUZA4aaA/w==",
+  tarballUrl:
+    "https://registry.npmjs.org/@aws-sdk/client-dynamodb/-/client-dynamodb-3.1130.0.tgz",
+};
 
 function fail(message) {
   throw new Error(message);
@@ -1171,6 +1182,66 @@ try {
     conformanceCases:conformanceCases.length,storageErrorIdentity:true,concurrencyErrorIdentity:true,backend:"DynamoDB Local"})+"\n");
 } finally { client.destroy(); }
 `;
+async function admitConsumerAwsSdk(options, seams) {
+  const response = await request(
+    REGISTRY +
+      encodeURIComponent(consumerAwsSdk.name) +
+      "/" +
+      consumerAwsSdk.version,
+    seams.fetch,
+  );
+  if (response.status !== 200) {
+    await response.body?.cancel();
+    fail("reviewed consumer AWS SDK metadata is unavailable");
+  }
+  const bytes = await responseBytes(response, 2 * 1024 * 1024);
+  const metadata = JSON.parse(bytes.toString("utf8"));
+  if (
+    metadata.name !== consumerAwsSdk.name ||
+    metadata.version !== consumerAwsSdk.version ||
+    metadata.dist?.tarball !== consumerAwsSdk.tarballUrl ||
+    !equal(metadata.dist?.integrity, consumerAwsSdk.integrity)
+  )
+    fail("reviewed consumer AWS SDK metadata differs");
+  const archiveResponse = await request(consumerAwsSdk.tarballUrl, seams.fetch);
+  if (archiveResponse.status !== 200) {
+    await archiveResponse.body?.cancel();
+    fail("reviewed consumer AWS SDK archive is unavailable");
+  }
+  const archive = await responseBytes(archiveResponse, maximumTarBytes);
+  if (
+    !equal(
+      "sha512-" + hash(archive, "sha512", "base64"),
+      consumerAwsSdk.integrity,
+    )
+  )
+    fail("reviewed consumer AWS SDK archive differs");
+  if (options.output) {
+    const output = resolve(options.output);
+    await writeFile(join(output, "consumer-aws-sdk-metadata.json"), bytes, {
+      flag: "wx",
+    });
+    await writeFile(join(output, "consumer-aws-sdk.tgz"), archive, {
+      flag: "wx",
+    });
+    await writeFile(
+      join(output, "consumer-aws-sdk-admission.json"),
+      JSON.stringify(
+        {
+          ...consumerAwsSdk,
+          archiveSha256: hash(archive),
+          archiveBytes: archive.length,
+          metadataSha256: hash(bytes),
+          scope:
+            "Pinned direct consumer root only; no transitive or AWS provenance qualification",
+        },
+        null,
+        2,
+      ) + "\n",
+      { flag: "wx" },
+    );
+  }
+}
 export async function runPublicConsumer(manifest, options = {}, seams = {}) {
   return temporary(async (directory) => {
     const context = await npmContext(
@@ -1195,8 +1266,12 @@ export async function runPublicConsumer(manifest, options = {}, seams = {}) {
       dynamo.package.dependencies?.["@pegma/storage-core"] !== "0.4.0"
     )
       fail("Dynamo consumer requires the genuine released Core0.4.0");
-    dependencies["@aws-sdk/client-dynamodb"] =
-      dynamo.package.dependencies["@aws-sdk/client-dynamodb"];
+    if (dynamo.package.dependencies?.[consumerAwsSdk.name] !== "^3.1097.0")
+      fail(
+        "Dynamo consumer AWS SDK declaration differs from the reviewed range",
+      );
+    dependencies[consumerAwsSdk.name] = consumerAwsSdk.version;
+    await admitConsumerAwsSdk(options, seams);
     await writeFile(
       join(directory, "package.json"),
       JSON.stringify({
@@ -1228,6 +1303,42 @@ export async function runPublicConsumer(manifest, options = {}, seams = {}) {
           installed.resolved !== canonicalTarball(record))
       )
         fail("public consumer resolved an unexpected package");
+    }
+    const sdkKey = "node_modules/" + consumerAwsSdk.name;
+    if (!Object.hasOwn(lock.packages ?? {}, sdkKey))
+      fail("public consumer AWS SDK root is missing");
+    for (const [key, installed] of Object.entries(lock.packages)) {
+      if (key !== sdkKey && !key.endsWith("/" + sdkKey)) continue;
+      if (
+        !key.startsWith("node_modules/") ||
+        key.includes("\\") ||
+        key.split("/").some((part) => ["", ".", ".."].includes(part)) ||
+        installed?.version !== consumerAwsSdk.version ||
+        installed.link ||
+        !equal(installed.integrity, consumerAwsSdk.integrity) ||
+        installed.resolved !== consumerAwsSdk.tarballUrl
+      )
+        fail("public consumer resolved an unexpected AWS SDK");
+      const sdkDirectory = join(directory, key);
+      const details = await lstat(sdkDirectory);
+      const sdkManifest = join(sdkDirectory, "package.json");
+      const metadata = await lstat(sdkManifest);
+      if (
+        !details.isDirectory() ||
+        details.isSymbolicLink() ||
+        (await realpath(sdkDirectory)) !== resolve(sdkDirectory) ||
+        !metadata.isFile() ||
+        metadata.isSymbolicLink() ||
+        metadata.size > 1024 * 1024 ||
+        (await realpath(sdkManifest)) !== resolve(sdkManifest)
+      )
+        fail("public consumer AWS SDK files have an unexpected origin");
+      const actual = JSON.parse(await readFile(sdkManifest, "utf8"));
+      if (
+        actual.name !== consumerAwsSdk.name ||
+        actual.version !== consumerAwsSdk.version
+      )
+        fail("public consumer AWS SDK file identity differs");
     }
     await writeFile(join(directory, "consumer.mjs"), publicConsumer, {
       flag: "wx",
