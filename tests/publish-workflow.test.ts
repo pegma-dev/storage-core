@@ -47,6 +47,45 @@ function inlinePublisher(): string {
 }
 
 describe("publish workflow", () => {
+  it("resolves runner paths only in the consuming step context", () => {
+    for (const name of [
+      "identity",
+      "validate",
+      "prepare",
+      "smoke",
+      "preflight",
+      "publish",
+      "verify",
+    ]) {
+      const job = workflowJob(name);
+      expect(job.slice(0, job.indexOf("\n    steps:"))).not.toMatch(
+        /\$\{\{\s*runner\./u,
+      );
+    }
+    for (const [job, step, directory] of [
+      ["smoke", "Smoke-test the prepared release copy", "storage-smoke"],
+      ["preflight", "Verify registry preflight", "storage-preflight-input"],
+      ["publish", "Verify and publish the prepared release", "storage-publish"],
+      [
+        "verify",
+        "Verify registry bytes provenance and consumer",
+        "storage-final-input",
+      ],
+    ]) {
+      expect(workflowStep(workflowJob(job!), step!)).toContain(
+        "RELEASE_DIRECTORY: ${{ runner.temp }}/" + directory,
+      );
+    }
+    expect(
+      workflowStep(
+        workflowJob("publish"),
+        "Verify and publish the prepared release",
+      ),
+    ).toContain(
+      "PREFLIGHT_DIRECTORY: ${{ runner.temp }}/storage-publish-preflight",
+    );
+  });
+
   it("requires actual Node22 and Node24 full gates before preparation", () => {
     const validation = workflowJob("validate"),
       prepare = workflowJob("prepare");

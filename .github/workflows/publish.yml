@@ -184,7 +184,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
-      RELEASE_DIRECTORY: ${{ runner.temp }}/storage-smoke
     steps:
       - name: Check out the exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -209,6 +208,8 @@ jobs:
           path: ${{ runner.temp }}/storage-smoke
           merge-multiple: true
       - name: Smoke-test the prepared release copy
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-smoke
         run: >-
           node scripts/release-packages.mjs smoke
           --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
@@ -235,7 +236,6 @@ jobs:
       preflight-digest: ${{ steps.seal.outputs.preflight_digest }}
     env:
       EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
-      RELEASE_DIRECTORY: ${{ runner.temp }}/storage-preflight-input
     steps:
       - name: Check out the exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -255,6 +255,8 @@ jobs:
           path: ${{ runner.temp }}/storage-preflight-input
           merge-multiple: true
       - name: Verify registry preflight
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-preflight-input
         run: >-
           node scripts/release-registry-verify.mjs preflight
           --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
@@ -289,8 +291,6 @@ jobs:
       EXPECTED_POLICY_DIGEST: ${{ needs.prepare.outputs.policy-digest }}
       REGISTRY_POLICY_BASE64: ${{ needs.prepare.outputs.policy-base64 }}
       EXPECTED_PREFLIGHT_DIGEST: ${{ needs.preflight.outputs.preflight-digest }}
-      RELEASE_DIRECTORY: ${{ runner.temp }}/storage-publish
-      PREFLIGHT_DIRECTORY: ${{ runner.temp }}/storage-publish-preflight
     steps:
       - name: Verify the release tag
         shell: bash
@@ -354,6 +354,9 @@ jobs:
           path: ${{ runner.temp }}/storage-publish-preflight
           merge-multiple: true
       - name: Verify and publish the prepared release
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-publish
+          PREFLIGHT_DIRECTORY: ${{ runner.temp }}/storage-publish-preflight
         shell: bash
         run: |
           set -euo pipefail
@@ -589,7 +592,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
-      RELEASE_DIRECTORY: ${{ runner.temp }}/storage-final-input
     steps:
       - name: Check out the exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -614,6 +616,8 @@ jobs:
           path: ${{ runner.temp }}/storage-final-input
           merge-multiple: true
       - name: Verify registry bytes provenance and consumer
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-final-input
         run: >-
           node scripts/release-registry-verify.mjs verify
           --manifest "${RELEASE_DIRECTORY}/package-manifest.json"

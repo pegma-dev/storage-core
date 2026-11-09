@@ -153,7 +153,11 @@ function downloadPorts(record = syntheticRecord(), bytes = archive()) {
 interface BundleFixture {
   predicateType: string;
   bundle: {
-    dsseEnvelope: { payloadType: string; payload: string };
+    dsseEnvelope: {
+      payloadType: string;
+      payload: string;
+      signatures?: unknown[];
+    };
     verificationMaterial: unknown;
   };
 }
@@ -1160,6 +1164,9 @@ async function pipelineFixture() {
     selected: "absent" as "absent" | "present" | "unknown",
     acceptedPublish: false,
     publishThrows: false,
+    auditOutput: historical.audit as unknown,
+    consumerDependencies: [] as Array<Record<string, string>>,
+    afterConsumer: undefined as (() => void) | undefined,
   };
   const output = (stdout = "", status = 0) => ({
     pid: 0,
@@ -1248,6 +1255,8 @@ async function pipelineFixture() {
         const input = JSON.parse(
           readFileSync(join(cwd, "package.json"), "utf8"),
         );
+        if (input.name === "storage-public-consumer")
+          state.consumerDependencies.push(structuredClone(input.dependencies));
         const packages: Record<string, unknown> = {};
         for (const record of records.values()) {
           if (!Object.hasOwn(input.dependencies, record.name)) continue;
@@ -1271,7 +1280,7 @@ async function pipelineFixture() {
       }
       if (args[1] === "audit")
         return output(
-          JSON.stringify(historical.audit),
+          JSON.stringify(state.auditOutput),
           state.auditFails ? 1 : 0,
         );
     }
@@ -1284,8 +1293,14 @@ async function pipelineFixture() {
       expect(source).toContain('from "@pegma/storage-dynamodb"');
       expect(source).toContain("e instanceof StorageError");
       expect(source).toContain("e instanceof ConcurrencyError");
+      state.afterConsumer?.();
       return output(
-        JSON.stringify({ status: "TEST_STUB_UNEXECUTED_PUBLIC_CONSUMER" }),
+        JSON.stringify({
+          status: "TEST_STUB_UNEXECUTED_PUBLIC_CONSUMER",
+          qualification: "UNQUALIFIED_STUBS",
+          publicConsumerExecuted: false,
+          cryptographicVerificationExecuted: false,
+        }),
         state.consumerFails ? 1 : 0,
       );
     }
@@ -1350,6 +1365,142 @@ async function pipelineFixture() {
     seams,
     gitRun,
   };
+}
+
+/** Enables only orchestration coverage at the existing scripted npm boundary.
+ * The selected candidate's certificate/SLSA are deliberately invalidated and
+ * have NO DSSE signature. This must never be used as registry qualification. */
+function enableUnqualifiedRegistryOnlyStub(
+  f: Awaited<ReturnType<typeof pipelineFixture>>,
+  manifest: PreparedManifest,
+) {
+  const selected = manifest.packages.filter(({ publish }) => publish);
+  expect(selected).toHaveLength(1);
+  const record = selected[0]!;
+  expect(record.name).toBe("@pegma/storage-dynamodb");
+  expect(manifest.releaseTag).toBe("v0.4.3");
+  const bundle = JSON.parse(
+    fixture("core040-slsa.json").toString("utf8"),
+  ) as BundleFixture;
+  const material = bundle.bundle.verificationMaterial as {
+    certificate: { rawBytes: string };
+  };
+  const certificate = Buffer.from(material.certificate.rawBytes, "base64");
+  const oldSan = Buffer.from(
+    "https://github.com/pegma-dev/storage-core/.github/workflows/publish.yml@refs/tags/v0.4.0",
+  );
+  const stubSan = Buffer.from(
+    "https://github.com/pegma-dev/storage-core/.github/workflows/publish.yml@refs/tags/" +
+      manifest.releaseTag,
+  );
+  // Same-length replacement preserves DER structure for the real claim parser
+  // while invalidating its signature; no certificate or attestation is signed.
+  expect(stubSan.length).toBe(oldSan.length);
+  let replacements = 0;
+  for (
+    let offset = certificate.indexOf(oldSan);
+    offset !== -1;
+    offset = certificate.indexOf(oldSan, offset + oldSan.length)
+  ) {
+    stubSan.copy(certificate, offset);
+    replacements += 1;
+  }
+  expect(replacements).toBeGreaterThan(0);
+  material.certificate.rawBytes = certificate.toString("base64");
+  bundle.bundle.dsseEnvelope.signatures = [];
+  changeClaim(
+    bundle,
+    ["subject"],
+    [
+      {
+        name:
+          "pkg:npm/" +
+          record.name.split("/").map(encodeURIComponent).join("/") +
+          "@" +
+          record.version,
+        digest: {
+          sha512: Buffer.from(record.integrity.slice(7), "base64").toString(
+            "hex",
+          ),
+        },
+      },
+    ],
+  );
+  changeClaim(
+    bundle,
+    ["predicate", "buildDefinition", "externalParameters", "workflow", "ref"],
+    "refs/tags/" + manifest.releaseTag,
+  );
+  changeClaim(
+    bundle,
+    ["predicate", "buildDefinition", "resolvedDependencies"],
+    [
+      {
+        uri:
+          "git+https://github.com/pegma-dev/storage-core@refs/tags/" +
+          manifest.releaseTag,
+        digest: { gitCommit: manifest.gitCommit },
+      },
+    ],
+  );
+  changeClaim(
+    bundle,
+    ["predicate", "runDetails", "metadata", "invocationId"],
+    "https://github.com/pegma-dev/storage-core/actions/runs/12345/attempts/1",
+  );
+  f.state.auditOutput = {
+    ...f.historical.audit,
+    qualification: "UNQUALIFIED_STUBS",
+    verified: [
+      ...f.historical.audit.verified,
+      {
+        name: record.name,
+        version: record.version,
+        location: "node_modules/" + record.name,
+        registry: REGISTRY,
+        attestationBundles: [bundle],
+      },
+    ],
+  };
+  const runUrl =
+    "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/12345";
+  f.historical.responses.set(runUrl, {
+    id: 12345,
+    head_sha: manifest.gitCommit,
+    head_branch: manifest.releaseTag,
+    run_attempt: 2,
+    event: "release",
+    path: ".github/workflows/publish.yml",
+    repository: { id: 1312519623, owner: { id: 309286193 } },
+  });
+  f.historical.responses.set(`${runUrl}/attempts/1/jobs?per_page=100`, {
+    qualification: "UNQUALIFIED_STUBS",
+    total_count: 1,
+    jobs: [
+      {
+        id: 1234501,
+        run_id: 12345,
+        run_attempt: 1,
+        head_branch: manifest.releaseTag,
+        head_sha: manifest.gitCommit,
+        name: "publish",
+        status: "completed",
+        conclusion: "failure",
+        started_at: "2026-07-28T06:13:43.000Z",
+        completed_at: "2026-07-28T06:14:49.000Z",
+        steps: [
+          {
+            name: "Verify and publish the prepared release",
+            status: "completed",
+            conclusion: "failure",
+            started_at: "2026-07-28T06:13:49.000Z",
+            completed_at: "2026-07-28T06:14:47.000Z",
+          },
+        ],
+      },
+    ],
+  });
+  f.state.selected = "present";
 }
 
 async function controlledPrepare(
@@ -1587,6 +1738,175 @@ describe("controlled real release orchestration (not release qualification)", ()
       rmSync(f.root, { recursive: true, force: true });
     }
   }, 180_000);
+
+  it("completes registry-only final receipt orchestration with explicit UNQUALIFIED_STUBS, never release qualification", async () => {
+    const f = await pipelineFixture();
+    try {
+      const prepared = await controlledPrepare(f);
+      enableUnqualifiedRegistryOnlyStub(f, prepared.manifest);
+      const output = join(f.root, "unqualified-postflight");
+      const callsBefore = f.calls.length;
+      const consumerInputsBefore = f.state.consumerDependencies.length;
+      const result = await withoutExplicitNpm(() =>
+        verifyRegistryRelease(
+          prepared.manifest,
+          {
+            root: f.root,
+            manifest: prepared.manifestPath,
+            expectedReleaseCommit: prepared.manifest.gitCommit,
+            expectedManifestSha256: digest(readFileSync(prepared.manifestPath)),
+            output,
+            runId: 12345,
+            runAttempt: 2,
+          },
+          f.seams,
+        ),
+      );
+      const audited = JSON.parse(
+        readFileSync(join(output, "npm-audit-signatures.json"), "utf8"),
+      );
+      expect(audited.qualification).toBe("UNQUALIFIED_STUBS");
+      expect(
+        audited.verified.at(-1).attestationBundles[0].bundle.dsseEnvelope
+          .signatures,
+      ).toEqual([]);
+      expect(result).toMatchObject({
+        status: "STORAGE_REGISTRY_CRYPTO_SOURCE_PUBLIC_CONSUMER_PASS",
+        decisions: prepared.manifest.packages.map(({ name, version }) => ({
+          name,
+          version,
+          action: "skip",
+        })),
+        consumer: {
+          status: "TEST_STUB_UNEXECUTED_PUBLIC_CONSUMER",
+          qualification: "UNQUALIFIED_STUBS",
+          publicConsumerExecuted: false,
+          cryptographicVerificationExecuted: false,
+        },
+        registryProof: {
+          auditSha256: digest(
+            readFileSync(join(output, "npm-audit-signatures.json")),
+          ),
+          lockSha256: digest(readFileSync(join(output, "package-lock.json"))),
+          publishingJobs: expect.arrayContaining([
+            expect.objectContaining({
+              id: 1234501,
+              attempt: 1,
+              conclusion: "failure",
+              sourceCommit: prepared.manifest.gitCommit,
+              packages: ["@pegma/storage-dynamodb"],
+            }),
+          ]),
+        },
+      });
+      expect(
+        JSON.parse(readFileSync(join(output, "verification.json"), "utf8")),
+      ).toEqual(result);
+      expect(f.state.consumerDependencies).toHaveLength(
+        consumerInputsBefore + 1,
+      );
+      const dynamo = prepared.manifest.packages.find(
+        ({ name }) => name === "@pegma/storage-dynamodb",
+      )!;
+      expect(f.state.consumerDependencies.at(-1)).toEqual({
+        ...Object.fromEntries(
+          prepared.manifest.packages.map(({ name, version }) => [
+            name,
+            version,
+          ]),
+        ),
+        "@aws-sdk/client-dynamodb": (
+          dynamo.package.dependencies as Record<string, string>
+        )["@aws-sdk/client-dynamodb"],
+      });
+      expect(
+        f.calls
+          .slice(callsBefore)
+          .filter(({ args }) => args.includes("--experimental-strip-types")),
+      ).toHaveLength(1);
+      expect(f.calls.some(({ args }) => args[0] === "publish")).toBe(false);
+      const consumerLock = JSON.parse(
+        readFileSync(join(output, "public-consumer-lock.json"), "utf8"),
+      );
+      for (const record of prepared.manifest.packages)
+        expect(consumerLock.packages["node_modules/" + record.name]).toEqual({
+          version: record.version,
+          integrity: record.integrity,
+          resolved: canonicalTarball(record),
+        });
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it.each(["consumer", "retained-audit", "retained-lock", "manifest"] as const)(
+    "withholds the final receipt after UNQUALIFIED_STUBS %s failure or post-consumer tampering",
+    async (fault) => {
+      const f = await pipelineFixture();
+      try {
+        const prepared = await controlledPrepare(f);
+        enableUnqualifiedRegistryOnlyStub(f, prepared.manifest);
+        const output = join(f.root, "unqualified-postflight-" + fault);
+        const manifestHash = digest(readFileSync(prepared.manifestPath));
+        f.state.consumerFails = fault === "consumer";
+        f.state.afterConsumer = () => {
+          const path =
+            fault === "retained-audit"
+              ? join(output, "npm-audit-signatures.json")
+              : fault === "retained-lock"
+                ? join(output, "package-lock.json")
+                : fault === "manifest"
+                  ? prepared.manifestPath
+                  : undefined;
+          if (path !== undefined)
+            writeFileSync(path, readFileSync(path, "utf8") + "\n");
+        };
+        const callsBefore = f.calls.length;
+        await withoutExplicitNpm(async () => {
+          await expect(
+            verifyRegistryRelease(
+              prepared.manifest,
+              {
+                root: f.root,
+                manifest: prepared.manifestPath,
+                expectedReleaseCommit: prepared.manifest.gitCommit,
+                expectedManifestSha256: manifestHash,
+                output,
+                runId: 12345,
+                runAttempt: 2,
+              },
+              f.seams,
+            ),
+          ).rejects.toThrow(
+            fault === "consumer"
+              ? "public DynamoDB consumer did not pass"
+              : fault === "manifest"
+                ? "prepared manifest independent digest differs"
+                : "retained cryptographic proof changed during public imports",
+          );
+        });
+        expect(
+          f.calls
+            .slice(callsBefore)
+            .filter(({ args }) => args.includes("--experimental-strip-types")),
+        ).toHaveLength(1);
+        const retained = JSON.parse(
+          readFileSync(join(output, "verification.json"), "utf8"),
+        );
+        // Earlier proof remains for diagnosis; the final combined receipt must
+        // not replace it after a failed consumer, changed proof or manifest.
+        expect(retained.status).toBe("REGISTRY_BYTES_CRYPTO_SOURCE_PASS");
+        expect(retained).not.toHaveProperty("consumer");
+        expect(
+          readFileSync(join(output, "public-consumer.stdout"), "utf8"),
+        ).toContain("UNQUALIFIED_STUBS");
+        expect(f.calls.some(({ args }) => args[0] === "publish")).toBe(false);
+      } finally {
+        rmSync(f.root, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
 
   it("refuses unknown occupancy, audit failure and byte-identical but unqualified selected source during real preflight", async () => {
     const f = await pipelineFixture();
