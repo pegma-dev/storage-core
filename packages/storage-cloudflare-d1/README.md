@@ -78,6 +78,47 @@ Replicated or session-based reads are incompatible with this adapter. Even a
 session that starts on the primary may use replicas for subsequent reads, so
 the adapter deliberately does not use the Sessions API.
 
+## Optional concurrent keyed-read batching
+
+The default `readBatchSize: 1` retains direct keyed reads. To coalesce
+concurrent public `get` and `getVersioned` calls, opt in when constructing a
+Store inside the request:
+
+```ts
+const store = createCloudflareD1Store({
+  database: env.DB,
+  readBatchSize: 512,
+});
+```
+
+`readBatchSize` must be a safe integer from 1 through 512. This is an adapter
+tuning bound, not a Cloudflare batch-size limit. Calls queued together are
+sent as at most that many prepared keyed statements in one real D1 batch.
+There is at most one read batch in flight per Store, and a partial batch runs
+without waiting for more calls. Collection handles on that Store share the
+queue; separate Store instances do not. Use a request-scoped Store rather
+than sharing the queue across Worker requests.
+
+Only calls that actually reach storage concurrently can coalesce. Finish
+asynchronous key preparation before starting a parallel read wave if the
+caller needs predictable batching. Sequential awaited calls remain separate.
+There is no caching or same-key deduplication, and each caller decodes its
+own value. A batch failure rejects all reads in that batch; later calls can
+recover without an automatic fallback to individual requests.
+
+Writes, internal optimistic reads, partition lists, scans and transactions
+keep their existing paths. Batching does not add snapshot or read/write
+ordering guarantees: retain version checks and current-state fences. A new
+read after an awaited write still reads the direct primary binding.
+
+Cloudflare counts a `batch()` as one query against the invocation query
+limit, while statement constraints and row-based usage still apply. A larger
+batch reduces binding calls, not rows read or serialization work. Choose the
+size for the application's bounded record sizes and concurrent callers;
+512 arbitrary large records can exceed platform memory or result limits.
+Measure complete request budgets, including authentication and final fences,
+before relying on a Free-plan profile. See [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).
+
 ## Versions and deletes
 
 Versions are opaque strings backed by monotonically increasing SQLite integer
@@ -115,8 +156,9 @@ required by `@pegma/storage-core`.
 A transaction carries at most 100 actions, the same limit the Azure Tables
 adapter enforces, so an action list either works on both adapters or is
 refused by both with a `StorageError`. The limit is checked before any
-statement is sent. Each action costs one to three statements in the batch, and
-every statement counts against the Worker invocation's D1 query budget.
+statement is sent. Each action costs one to three statements in the batch.
+Cloudflare counts the batch as one query against the invocation query budget;
+individual statement constraints and row-based usage still apply.
 
 ## License
 

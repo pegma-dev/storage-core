@@ -29,9 +29,9 @@ const D1_ERROR_PREFIX = "D1_ERROR: ";
  * Largest transaction this adapter submits, matching the Azure adapter's
  * entity-group limit so the same action list is accepted or refused by both.
  *
- * D1 documents no batch statement count, but every statement inside a batch
- * counts against the Worker invocation's D1 query budget, and a guarded action
- * costs up to three. Rejecting an oversized list here keeps the failure a
+ * D1 counts a batch as one query against the invocation budget, while each
+ * guarded action costs up to three statements. Rejecting an oversized list
+ * here preserves the Azure adapter's action bound and keeps the failure a
  * `StorageError` naming the cause rather than an opaque backend error.
  */
 const MAX_TRANSACTION_ACTIONS = 100;
@@ -306,6 +306,56 @@ export interface CloudflareD1StoreOptions {
    * application's binding should not run DDL.
    */
   readonly createSchemaIfMissing?: boolean;
+
+  /**
+   * Coalesce concurrent public get/getVersioned calls into read-only batches.
+   * Defaults to 1, retaining direct keyed reads. Must be an integer from 1
+   * through 512. Larger values suit bounded small records, not arbitrary rows.
+   *
+   * Opt-in queues belong to this Store instance: construct it per request.
+   * No values are cached, and writes/internal optimistic reads are unchanged.
+   */
+  readonly readBatchSize?: number;
+}
+
+interface PendingRead {
+  readonly partition: string;
+  readonly id: string;
+  readonly resolve: (row: PhysicalRow | null) => void;
+  readonly reject: (reason: unknown) => void;
+}
+
+function batchRows(
+  results: CloudflareD1Result<PhysicalRow>[],
+  expected: number,
+): (PhysicalRow | null)[] {
+  if (!Array.isArray(results) || results.length !== expected) {
+    throw new StorageError("D1 returned an invalid keyed-read batch.");
+  }
+  return Array.from(results, (result) => {
+    if (
+      result === null ||
+      typeof result !== "object" ||
+      !Array.isArray(result.results) ||
+      result.results.length > 1
+    ) {
+      throw new StorageError("D1 returned an invalid keyed-read result.");
+    }
+    if (result.results.length === 0) return null;
+    const row = result.results[0];
+    if (
+      row === undefined ||
+      row === null ||
+      typeof row !== "object" ||
+      typeof row.version !== "string" ||
+      row.version.length === 0 ||
+      (row.deleted !== 0 && row.deleted !== 1) ||
+      (row.record_json !== null && typeof row.record_json !== "string")
+    ) {
+      throw new StorageError("D1 returned an invalid keyed-read row.");
+    }
+    return row;
+  });
 }
 
 function parseRecord(json: string): StoredRecord {
@@ -421,6 +471,20 @@ export function createCloudflareD1Store(
 ): Store {
   const { database } = options;
   const createSchemaIfMissing = options.createSchemaIfMissing ?? true;
+  const readBatchSize =
+    options.readBatchSize === undefined ? 1 : options.readBatchSize;
+  if (
+    !Number.isSafeInteger(readBatchSize) ||
+    readBatchSize < 1 ||
+    readBatchSize > 512
+  ) {
+    throw new StorageError(
+      "Read batch size must be an integer from 1 through 512.",
+    );
+  }
+  const pendingReads: PendingRead[] = [];
+  let readBatchScheduled = false;
+  let readBatchRunning = false;
 
   function ensureSchema(): Promise<void> {
     if (!createSchemaIfMissing) {
@@ -459,6 +523,56 @@ export function createCloudflareD1Store(
     return pending;
   }
 
+  function scheduleReadBatch(): void {
+    if (readBatchScheduled || readBatchRunning || pendingReads.length === 0) {
+      return;
+    }
+    readBatchScheduled = true;
+    queueMicrotask(() => {
+      readBatchScheduled = false;
+      // Every batch failure settles its callers below. Their read promises
+      // retain the work; there is no detached timer or background cache.
+      void drainReadBatches();
+    });
+  }
+
+  async function drainReadBatches(): Promise<void> {
+    if (readBatchRunning) return;
+    readBatchRunning = true;
+    try {
+      while (pendingReads.length > 0) {
+        const jobs = pendingReads.splice(0, readBatchSize);
+        try {
+          const results = await database.batch<PhysicalRow>(
+            jobs.map((job) =>
+              database.prepare(SELECT_ONE).bind(job.partition, job.id),
+            ),
+          );
+          const rows = batchRows(results, jobs.length);
+          for (const [index, job] of jobs.entries()) {
+            job.resolve(rows[index]!);
+          }
+        } catch (error) {
+          for (const job of jobs) job.reject(error);
+        }
+      }
+    } finally {
+      readBatchRunning = false;
+      scheduleReadBatch();
+    }
+  }
+
+  async function queuedRead(
+    partition: string,
+    id: string,
+  ): Promise<PhysicalRow | null> {
+    await ensureSchema();
+    return new Promise<PhysicalRow | null>((resolve, reject) => {
+      pendingReads.push({ partition, id, resolve, reject });
+      scheduleReadBatch();
+    });
+  }
+
   return {
     collection<T>(definition: CollectionDefinition<T>): CollectionStore<T> {
       const { codec, name } = definition;
@@ -486,6 +600,16 @@ export function createCloudflareD1Store(
 
       async function read(key: EntityKey): Promise<RecordRow | null> {
         const row = await readPhysical(key);
+        return row === null || row.deleted === 1 || row.record_json === null
+          ? null
+          : { record_json: row.record_json, version: row.version };
+      }
+
+      async function readForGet(key: EntityKey): Promise<RecordRow | null> {
+        const row =
+          readBatchSize === 1
+            ? await readPhysical(key)
+            : await queuedRead(partitionKey(key.partition), key.id);
         return row === null || row.deleted === 1 || row.record_json === null
           ? null
           : { record_json: row.record_json, version: row.version };
@@ -528,14 +652,14 @@ export function createCloudflareD1Store(
 
       return {
         async get(key) {
-          const row = await read(key);
+          const row = await readForGet(key);
           return row === null
             ? null
             : codec.decode(parseRecord(row.record_json));
         },
 
         async getVersioned(key) {
-          const row = await read(key);
+          const row = await readForGet(key);
           return row === null ? null : decodeRow(row);
         },
 
