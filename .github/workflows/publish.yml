@@ -147,11 +147,40 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          manifest_digest="$(sha256sum "${RUNNER_TEMP}/storage-prepared/package-manifest.json" | cut -d' ' -f1)"
-          policy_digest="$(sha256sum scripts/release-reuse-policy.json | cut -d' ' -f1)"
-          policy_base64="$(base64 -w0 scripts/release-reuse-policy.json)"
-          printf 'manifest_digest=%s\npolicy_digest=%s\npolicy_base64=%s\n' \
-            "${manifest_digest}" "${policy_digest}" "${policy_base64}" >> "${GITHUB_OUTPUT}"
+          node --input-type=module <<'SEAL'
+          import { appendFile, readFile } from "node:fs/promises";
+          import { createHash } from "node:crypto";
+          import { join } from "node:path";
+          import { verifyPreparedManifest } from "./scripts/release-packages.mjs";
+          const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+          const manifestPath = join(process.env.RUNNER_TEMP, "storage-prepared", "package-manifest.json");
+          const manifestBytes = await readFile(manifestPath);
+          const manifestDigest = digest(manifestBytes);
+          // Bind the strict schema/source/archive validation to this same buffer.
+          const manifest = await verifyPreparedManifest(manifestPath, {
+            root: process.cwd(),
+            expectedReleaseCommit: process.env.RELEASE_COMMIT,
+            expectedManifestSha256: manifestDigest,
+          });
+          if (manifest.gitCommit !== process.env.RELEASE_COMMIT ||
+            manifest.releaseTag !== process.env.RELEASE_TAG ||
+            !manifest.packages.every(record =>
+              record.publish === true && record.origin.kind === "source" ||
+              record.publish === false && record.origin.kind === "registryReuse"))
+            throw new Error("Validated release inventory identity differs");
+          const policyBytes = await readFile("scripts/release-reuse-policy.json");
+          const policyDigest = digest(policyBytes);
+          if (policyDigest !== manifest.registryPolicySha256 ||
+            !manifestBytes.equals(await readFile(manifestPath)))
+            throw new Error("Release inventory changed during sealing");
+          const reuseRequired = manifest.packages.some(record => record.origin.kind === "registryReuse");
+          await appendFile(process.env.GITHUB_OUTPUT, [
+            "manifest_digest=" + manifestDigest,
+            "policy_digest=" + policyDigest,
+            "policy_base64=" + policyBytes.toString("base64"),
+            "reuse_required=" + String(reuseRequired),
+          ].join("\n") + "\n");
+          SEAL
       - name: Upload the prepared release
         id: upload
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
@@ -163,7 +192,7 @@ jobs:
           overwrite: false
           retention-days: 30
       - name: Retain genuine registry reuse proof
-        if: always()
+        if: ${{ always() && (steps.seal.outcome != 'success' || steps.seal.outputs.reuse_required != 'false') }}
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
           name: storage-reuse-proof-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash, timingSafeEqual } from "node:crypto";
 import * as fsPromises from "node:fs/promises";
 import {
@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -1233,7 +1234,21 @@ async function pipelineFixture() {
         const metadata = JSON.parse(
           readFileSync(join(directory, "package.json"), "utf8"),
         );
-        const bytes = archive([], metadata);
+        const targets = Object.values(
+          metadata.exports as Record<string, string | Record<string, string>>,
+        ).flatMap((target) =>
+          typeof target === "string" ? [target] : Object.values(target),
+        );
+        const additional = [...new Set(targets)]
+          .filter(
+            (target) =>
+              !["./dist/index.js", "./dist/index.d.ts"].includes(target),
+          )
+          .map((target) => ({
+            path: "package/" + target.slice(2),
+            body: "export {};",
+          }));
+        const bytes = archive(additional, metadata);
         const inspected = inspectReleaseTarball(bytes);
         const tarball = `${metadata.name.slice(1).replace("/", "-")}-${metadata.version}.tgz`;
         const destination = args[args.indexOf("--pack-destination") + 1]!;
@@ -1626,6 +1641,7 @@ function enableUnqualifiedRegistryOnlyStub(
 async function controlledPrepare(
   f: Awaited<ReturnType<typeof pipelineFixture>>,
   output?: string,
+  skipSmoke = false,
 ) {
   vi.resetModules();
   vi.doMock("node:child_process", async (importOriginal) => ({
@@ -1640,6 +1656,7 @@ async function controlledPrepare(
         root: f.root,
         requireClean: true,
         releaseTag: "v0.4.3",
+        ...(skipSmoke ? { skipSmoke: true } : {}),
         ...(output === undefined ? {} : { output }),
       }),
     );
@@ -1647,6 +1664,97 @@ async function controlledPrepare(
     vi.unstubAllGlobals();
     vi.doUnmock("node:child_process");
     vi.resetModules();
+  }
+}
+
+/** Execute the actual workflow SEAL with the real strict manifest reader.
+ * The temp re-export changes only module location, never validation behavior.
+ * No upload action, npm audit, SDK runtime or registry qualification is claimed. */
+function actualInventorySeal(
+  f: Awaited<ReturnType<typeof pipelineFixture>>,
+  prepared: { manifestPath: string; manifest: PreparedManifest },
+  change?: (directory: string, scripts: string) => void,
+) {
+  const runner = mkdtempSync(
+    join(realpathSync(tmpdir()), "storage-seal-test-"),
+  );
+  try {
+    const directory = join(runner, "storage-prepared");
+    mkdirSync(directory);
+    for (const name of [
+      "package-manifest.json",
+      ...prepared.manifest.packages.map(({ tarball }) => tarball),
+    ])
+      copyFileSync(
+        join(dirname(prepared.manifestPath), name),
+        join(directory, name),
+      );
+    const scripts = join(f.root, "scripts");
+    mkdirSync(scripts, { recursive: true });
+    const actualReader = new URL(
+      "../scripts/release-packages.mjs",
+      import.meta.url,
+    ).href;
+    writeFileSync(
+      join(scripts, "release-packages.mjs"),
+      `export {verifyPreparedManifest} from ${JSON.stringify(actualReader)};\n`,
+    );
+    copyFileSync(
+      new URL("../scripts/release-reuse-policy.json", import.meta.url),
+      join(scripts, "release-reuse-policy.json"),
+    );
+    change?.(directory, scripts);
+    const workflow = readFileSync(
+      new URL("../.github/workflows/publish.yml", import.meta.url),
+      "utf8",
+    ).replace(/\r\n/gu, "\n");
+    const match = /<<'SEAL'\n([^]*?)\n          SEAL/u.exec(workflow);
+    if (match === null)
+      throw new Error("Actual workflow seal heredoc was not found.");
+    const source = match[1]!
+      .split("\n")
+      .map((line) => line.replace(/^ {10}/u, ""))
+      .join("\n");
+    const output = join(runner, "outputs");
+    const result = spawnSync(process.execPath, ["--input-type=module"], {
+      cwd: f.root,
+      // A seal must not start unused registry verification, even for all-source.
+      input:
+        'globalThis.fetch = () => { throw new Error("No registry verification is allowed while sealing"); };\n' +
+        source,
+      encoding: "utf8",
+      timeout: 20_000,
+      env: {
+        PATH: process.env.PATH,
+        SystemRoot: process.env.SystemRoot,
+        HOME: tmpdir(),
+        TMP: tmpdir(),
+        RUNNER_TEMP: runner,
+        RELEASE_COMMIT: prepared.manifest.gitCommit,
+        RELEASE_TAG: prepared.manifest.releaseTag!,
+        GITHUB_OUTPUT: output,
+      },
+    });
+    const text = existsSync(output) ? readFileSync(output, "utf8") : undefined;
+    return {
+      result,
+      output: text,
+      outputs:
+        text === undefined
+          ? undefined
+          : Object.fromEntries(
+              text
+                .trim()
+                .split("\n")
+                .map((line) => {
+                  const separator = line.indexOf("=");
+                  return [line.slice(0, separator), line.slice(separator + 1)];
+                }),
+            ),
+      files: readdirSync(directory).sort(),
+    };
+  } finally {
+    rmSync(runner, { recursive: true, force: true });
   }
 }
 
@@ -1753,6 +1861,92 @@ async function actualInlinePublisher(
 }
 
 describe("controlled real release orchestration (not release qualification)", () => {
+  it("prepares an all-selected unsigned fixture without unused reuse verification and seals explicit false", async () => {
+    const f = await pipelineFixture();
+    try {
+      for (const directory of [
+        "storage-core",
+        "storage-azure-tables",
+        "storage-cloudflare-d1",
+        "storage-dynamodb",
+      ]) {
+        const path = join(f.root, "packages", directory, "package.json");
+        const metadata = JSON.parse(readFileSync(path, "utf8"));
+        metadata.version = "0.4.3";
+        if (metadata.dependencies?.["@pegma/storage-core"] !== undefined)
+          metadata.dependencies["@pegma/storage-core"] = "0.4.3";
+        writeFileSync(path, JSON.stringify(metadata));
+      }
+      const rootManifestPath = join(f.root, "package.json");
+      const rootManifest = JSON.parse(readFileSync(rootManifestPath, "utf8"));
+      rootManifest.devDependencies["@pegma/storage-cloudflare-d1"] =
+        "workspace:0.4.3";
+      writeFileSync(rootManifestPath, JSON.stringify(rootManifest));
+      const lockPath = join(f.root, "pnpm-lock.yaml");
+      writeFileSync(
+        lockPath,
+        readFileSync(lockPath, "utf8")
+          .replaceAll("workspace:0.4.1", "workspace:0.4.3")
+          .replaceAll("specifier: 0.4.0", "specifier: 0.4.3"),
+      );
+      f.gitRun(["add", "."]);
+      f.gitRun([
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        "fictional all-selected source",
+      ]);
+      // Only future-shaped preparation is exercised. No future Core runtime or
+      // public-consumer compatibility is claimed by these unsigned archives.
+      const prepared = await controlledPrepare(f, undefined, true);
+      expect(prepared.manifest.packages.map(({ publish }) => publish)).toEqual([
+        true,
+        true,
+        true,
+        true,
+      ]);
+      const expectedFiles = [
+        "package-manifest.json",
+        ...prepared.manifest.packages.map(({ tarball }) => tarball),
+      ].sort();
+      expect(readdirSync(dirname(prepared.manifestPath)).sort()).toEqual(
+        expectedFiles,
+      );
+      expect(expectedFiles).toHaveLength(5);
+      expect(f.calls.filter(({ args }) => args[0] === "pack")).toHaveLength(4);
+      expect(
+        f.calls.some(
+          ({ command, args }) =>
+            command === "tar" ||
+            args.includes("audit") ||
+            args.includes("--experimental-strip-types"),
+        ),
+      ).toBe(false);
+      expect(existsSync(join(f.root, ".release-reuse-verification"))).toBe(
+        false,
+      );
+      expect(existsSync(join(f.root, ".release-consumer-verification"))).toBe(
+        false,
+      );
+      const sealed = actualInventorySeal(f, prepared);
+      expect(sealed.result.error).toBeUndefined();
+      expect(sealed.result.status, sealed.result.stderr).toBe(0);
+      expect(sealed.files).toEqual(expectedFiles);
+      expect(sealed.outputs).toEqual({
+        manifest_digest: digest(readFileSync(prepared.manifestPath)),
+        policy_digest: prepared.manifest.registryPolicySha256,
+        policy_base64: readFileSync(
+          new URL("../scripts/release-reuse-policy.json", import.meta.url),
+        ).toString("base64"),
+        reuse_required: "false",
+      });
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
   it("admits the genuine reviewed AWS archive and pins the direct consumer root without claiming runtime or crypto execution", async () => {
     const f = await pipelineFixture();
     try {
@@ -2027,6 +2221,81 @@ describe("controlled real release orchestration (not release qualification)", ()
           .slice(callsBefore)
           .some(({ args }) => args.includes("--experimental-strip-types")),
       ).toBe(false);
+      const sealed = actualInventorySeal(f, prepared);
+      expect(sealed.result.error).toBeUndefined();
+      expect(sealed.result.status, sealed.result.stderr).toBe(0);
+      expect(sealed.files).toEqual(
+        [
+          "package-manifest.json",
+          ...prepared.manifest.packages.map(({ tarball }) => tarball),
+        ].sort(),
+      );
+      expect(sealed.files).toHaveLength(5);
+      expect(sealed.outputs).toEqual({
+        manifest_digest: digest(readFileSync(prepared.manifestPath)),
+        policy_digest: prepared.manifest.registryPolicySha256,
+        policy_base64: readFileSync(
+          new URL("../scripts/release-reuse-policy.json", import.meta.url),
+        ).toString("base64"),
+        reuse_required: "true",
+      });
+      for (const fault of [
+        "extra-file",
+        "missing-tarball",
+        "tar-bytes",
+        "invalid-origin",
+        "source-identity",
+        "policy-drift",
+      ] as const) {
+        const refused = actualInventorySeal(
+          f,
+          prepared,
+          (directory, scripts) => {
+            if (fault === "extra-file")
+              writeFileSync(
+                join(directory, "unexpected.txt"),
+                "not in the sealed inventory",
+              );
+            else if (fault === "missing-tarball")
+              rmSync(join(directory, prepared.manifest.packages[0]!.tarball));
+            else if (fault === "tar-bytes") {
+              const path = join(
+                directory,
+                prepared.manifest.packages[0]!.tarball,
+              );
+              writeFileSync(
+                path,
+                Buffer.concat([readFileSync(path), Buffer.from("changed")]),
+              );
+            } else if (fault === "policy-drift") {
+              const path = join(scripts, "release-reuse-policy.json");
+              writeFileSync(path, readFileSync(path, "utf8") + "\n");
+            } else {
+              const path = join(directory, "package-manifest.json");
+              const malformed = JSON.parse(readFileSync(path, "utf8"));
+              if (fault === "source-identity")
+                malformed.gitCommit = "f".repeat(40);
+              else malformed.packages.at(-1).origin = {};
+              writeFileSync(path, JSON.stringify(malformed));
+            }
+          },
+        );
+        expect(refused.result.error).toBeUndefined();
+        expect(refused.result.status).toBe(1);
+        expect(refused.result.stderr).toContain(
+          fault === "invalid-origin"
+            ? "selected source origin differs from the release"
+            : fault === "source-identity"
+              ? "prepared manifest does not match the current approved checkout"
+              : fault === "policy-drift"
+                ? "Release inventory changed during sealing"
+                : fault === "tar-bytes"
+                  ? "prepared artifact is not the original regular file"
+                  : "release output inventory does not match the package manifest",
+        );
+        expect(refused.output).toBeUndefined();
+        expect(refused.outputs).toBeUndefined();
+      }
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

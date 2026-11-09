@@ -1,5 +1,10 @@
 # Security Scan — storage-core
 
+> Historical point-in-time review from July 2026, including the dated follow-up
+> dispositions below. This is not a current source or command-execution inventory;
+> later changes require their own review. See [Release operations](RELEASING.md)
+> for the current release process and its required verification gates.
+
 Repository-wide security review performed 2026-07-28.
 
 Scope: all first-party source (`packages/*/src`), scripts, CI/CD workflows,

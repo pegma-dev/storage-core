@@ -47,6 +47,56 @@ function inlinePublisher(): string {
 }
 
 describe("publish workflow", () => {
+  it.each([
+    { outcome: "success", reuseRequired: "false", upload: false },
+    { outcome: "success", reuseRequired: "true", upload: true },
+    { outcome: "success", reuseRequired: undefined, upload: true },
+    { outcome: "success", reuseRequired: "unknown", upload: true },
+    { outcome: "failure", reuseRequired: "false", upload: true },
+    { outcome: "skipped", reuseRequired: undefined, upload: true },
+  ])(
+    "retains reuse proof for seal=$outcome, reuse_required=$reuseRequired: $upload",
+    ({ outcome, reuseRequired, upload }) => {
+      const step = workflowStep(
+        workflowJob("prepare"),
+        "Retain genuine registry reuse proof",
+      );
+      const condition = /^\s+if: \$\{\{ (.+) \}\}$/mu.exec(step)?.[1];
+      if (condition === undefined)
+        throw new Error("Actual reuse-proof upload condition was not found.");
+      // The actual seal emits canonical boolean strings; do not use this JS
+      // evaluator to claim GitHub's string case-comparison semantics.
+      // Evaluate the actual condition with its two GitHub contexts supplied.
+      // This does not pretend to execute upload-artifact or its file globbing.
+      const evaluate = new Function(
+        "always",
+        "steps",
+        `return (${condition});`,
+      ) as (
+        always: () => boolean,
+        steps: {
+          seal: { outcome: string; outputs: { reuse_required?: string } };
+        },
+      ) => boolean;
+      expect(
+        evaluate(() => true, {
+          seal: {
+            outcome,
+            outputs:
+              reuseRequired === undefined
+                ? {}
+                : { reuse_required: reuseRequired },
+          },
+        }),
+      ).toBe(upload);
+      expect(step).toContain("if-no-files-found: error");
+      expect(step).toContain("overwrite: false");
+      expect(step).toContain(
+        "actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4",
+      );
+    },
+  );
+
   it("resolves runner paths only in the consuming step context", () => {
     for (const name of [
       "identity",
