@@ -45,11 +45,13 @@ and [SHA256SUMS](https://github.com/pegma-dev/storage-core/releases/download/v0.
 | dynamodb045-original-jobs.json | https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292/attempts/1/jobs?per_page=100 | 592ce8c17ce55c17a6abc2a6487524b88ddb3bc55195b0ef1397da72bc068173 |
 
 `dynamodb045-slsa.json` retains the complete unique SLSA-v1 bundle object from
-the actual npm 11.18.0 signature/attestation audit used for release qualification.
+the canonical official npm attestation response, observed 2026-11-09. The complete
+response has SHA256 `b99dff0c372781bda547ab9c4a925a15a3b8bfad50c2d8472f2aaad21c537063`.
+This is the release provenance authenticated by npm 11.18.0 during qualification.
 Its signed base64 payload, certificate, signatures, transparency entries and
 timestamps are unchanged; the transparency-log index is `3768594534`. The JSON
-fixtures preserve the captured objects semantically. Their formatting need not
-match the original HTTP or audit serialization: the hashes above identify the
+fixtures preserve the public response objects semantically. Their formatting need not
+match the original HTTP serialization: the hashes above identify the
 current fixture files, not the original wire responses.
 
 The actual original writer was run `42679292292`, **attempt 1**, job
