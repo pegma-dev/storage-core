@@ -70,18 +70,34 @@ Work on a `claude/*` branch and open a pull request. The gate is
 
 Publishing is trusted-publisher only; no tokens exist. A release starts from a
 protected signed annotated `vX.Y.Z` tag already on `origin/main`, followed by
-`gh release create vX.Y.Z --verify-tag`. The unprivileged preparation job runs
-the gate and packs the exact artifacts; only the minimal publish job receives
-OIDC authority. Publication is integrity-checked, retry-safe, and
+`gh release create vX.Y.Z --verify-tag`. Unprivileged validation jobs run the
+full gates on Node 22 and 24. Preparation depends on that validation and the
+signed-release identity checks, packs only selected source packages, and retains
+the independently pinned exact original registry archives for unselected
+packages. Only the minimal publish job receives OIDC authority.
+Publication is integrity-checked, retry-safe, and
 dependency-ordered. See `docs/RELEASING.md`.
+
+The sole registration exception is a separately reviewed, metadata-only first
+`@pegma/storage-dynamodb@0.4.2` archive under `bootstrap`, which may be published
+only by the maintainer with interactive 2FA. It contains no runtime, exports, scripts or
+dependencies, is not an SDK/release qualification, and is never a host input.
+Actual runtime publication remains trusted-publisher only.
+
+Schema 2 packs only selected source packages. Unselected packages reuse exact,
+independently pinned original registry archives with genuine signature/Sigstore
+and historical source checks. Never label unversioned workspace changes as
+published code or substitute them for the pinned Core `0.4.0` runtime/error classes.
 
 ## Where things stand
 
 All four packages are in this repository. `@pegma/storage-core` and
 `@pegma/storage-azure-tables` are published at `0.4.0`,
 `@pegma/storage-cloudflare-d1` carries a `0.4.1` transaction-robustness
-patch of its own, and `@pegma/storage-dynamodb` is the AWS adapter at
-`0.4.2` (see `docs/AWS_ADAPTER.md`). The port offers keyed access,
+patch of its own. DynamoDB `0.4.2` is reserved for registration-only metadata;
+`@pegma/storage-dynamodb@0.4.3` is the unpublished first trusted AWS runtime
+candidate (see `docs/AWS_ADAPTER.md` and `docs/RELEASING.md`). Do not claim
+registration or release before its actual registry evidence. The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.

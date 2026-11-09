@@ -1,33 +1,24 @@
-# Publishes exact tarballs prepared from a stable GitHub release tag.
-# Authentication is npm trusted-publisher OIDC only; no token fallback exists.
-
+# Publication uses selected source and authenticated original registry archives.
 name: Publish
-
 on:
   release:
     types: [published]
-
 permissions:
   contents: read
-
 concurrency:
   group: npm-publish
   cancel-in-progress: false
+env:
+  CI: "1"
+  RELEASE_TAG: ${{ github.event.release.tag_name }}
+  RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
+  RELEASE_COMMIT: ${{ github.sha }}
+  RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
+  REVIEWED_NPM_VERSION: "11.18.0"
 
 jobs:
-  prepare:
+  identity:
     runs-on: ubuntu-latest
-    outputs:
-      manifest-digest: ${{ steps.seal.outputs.manifest_digest }}
-      artifact-digest: ${{ steps.upload.outputs['artifact-digest'] }}
-    env:
-      CI: "1"
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
-      RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
-      RELEASE_COMMIT: ${{ github.sha }}
-      RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
-      REVIEWED_NPM_VERSION: "11.18.0"
-
     steps:
       - name: Verify the release tag
         shell: bash
@@ -68,147 +59,267 @@ jobs:
           git -C "${verify_directory}" merge-base --is-ancestor \
             "${RELEASE_COMMIT}" refs/remotes/origin/main
 
+  validate:
+    needs: identity
+    name: Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 24]
+    steps:
       - name: Check out the exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
-
-      - name: Configure checkout tag verification
-        shell: bash
-        run: |
-          set -euo pipefail
-          allowed_signers="${RUNNER_TEMP}/release-allowed-signers"
-          [[ -f "${allowed_signers}" ]]
-          git config --local gpg.format ssh
-          git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
-
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24.18.0
+          node-version: ${{ matrix.node-version }}
           package-manager-cache: false
-
-      - name: Check the npm version
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$(npm --version)" == "${REVIEWED_NPM_VERSION}" ]]
-
       - name: Set up Java for DynamoDB Local
         uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
         with:
           distribution: temurin
           java-version: "21"
-
       - name: Enable Corepack
         run: corepack enable
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
       - name: Check formatting
         run: pnpm run format:check
-
       - name: Check types
         run: pnpm run check
-
       - name: Run tests
         run: pnpm test
+      - name: Check release metadata
+        run: pnpm run release:check
 
-      - name: Pack the release files
-        run: >-
-          pnpm run release:pack -- --require-clean --require-main-ancestor
-          --require-release-tag --skip-smoke
-          --expected-release-commit "${RELEASE_COMMIT}" --output .release
-
-      - name: Seal the release inventory
-        id: seal
-        shell: bash
-        run: |
-          set -euo pipefail
-          manifest_digest="$(sha256sum .release/package-manifest.json | cut -d' ' -f1)"
-          echo "manifest_digest=${manifest_digest}" >> "${GITHUB_OUTPUT}"
-
-      - name: Upload the prepared release
-        id: upload
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
-        with:
-          name: storage-release-${{ github.run_id }}
-          path: .release/
-          if-no-files-found: error
-          include-hidden-files: false
-          overwrite: true
-          retention-days: 30
-
-      - name: Record the prepared artifact digest
-        env:
-          ARTIFACT_DIGEST: ${{ steps.upload.outputs['artifact-digest'] }}
-        run: echo "Prepared artifact SHA-256 ${ARTIFACT_DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
-
-  smoke:
-    needs: prepare
+  prepare:
+    needs: [identity, validate]
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      CI: "1"
-      RELEASE_COMMIT: ${{ github.sha }}
-      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs['manifest-digest'] }}
-      RELEASE_DIRECTORY: ${{ github.workspace }}/storage-release
-
+    outputs:
+      manifest-digest: ${{ steps.seal.outputs.manifest_digest }}
+      policy-digest: ${{ steps.seal.outputs.policy_digest }}
+      policy-base64: ${{ steps.seal.outputs.policy_base64 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - name: Check out the exact release commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 1
-
+          fetch-depth: 0
+      - name: Configure checkout tag verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          allowed_signers="${RUNNER_TEMP}/release-allowed-signers"
+          umask 077
+          printf '%s\n' "${RELEASE_ALLOWED_SIGNERS}" > "${allowed_signers}"
+          git config --local gpg.format ssh
+          git config --local gpg.ssh.allowedSignersFile "${allowed_signers}"
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24.18.0
           package-manager-cache: false
-
-      - name: Download the prepared release copy
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: storage-release-${{ github.run_id }}
-          path: ${{ github.workspace }}/storage-release
-
-      - name: Verify the prepared manifest digest
+      - name: Check the npm version
         shell: bash
         run: |
           set -euo pipefail
-          [[ "${EXPECTED_MANIFEST_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
-          actual="$(sha256sum "${RELEASE_DIRECTORY}/package-manifest.json" | cut -d' ' -f1)"
-          [[ "${actual}" == "${EXPECTED_MANIFEST_DIGEST}" ]]
+          [[ "$(npm --version)" == "${REVIEWED_NPM_VERSION}" ]]
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Pack the release files
+        run: >-
+          pnpm run release:pack -- --require-clean --require-main-ancestor
+          --require-release-tag --skip-smoke
+          --expected-release-commit "${RELEASE_COMMIT}"
+          --output "${RUNNER_TEMP}/storage-prepared"
+      - name: Seal the release inventory
+        id: seal
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'SEAL'
+          import { appendFile, readFile } from "node:fs/promises";
+          import { createHash } from "node:crypto";
+          import { join } from "node:path";
+          import { verifyPreparedManifest } from "./scripts/release-packages.mjs";
+          const digest = bytes => createHash("sha256").update(bytes).digest("hex");
+          const manifestPath = join(process.env.RUNNER_TEMP, "storage-prepared", "package-manifest.json");
+          const manifestBytes = await readFile(manifestPath);
+          const manifestDigest = digest(manifestBytes);
+          // Bind the strict schema/source/archive validation to this same buffer.
+          const manifest = await verifyPreparedManifest(manifestPath, {
+            root: process.cwd(),
+            expectedReleaseCommit: process.env.RELEASE_COMMIT,
+            expectedManifestSha256: manifestDigest,
+          });
+          if (manifest.gitCommit !== process.env.RELEASE_COMMIT ||
+            manifest.releaseTag !== process.env.RELEASE_TAG ||
+            !manifest.packages.every(record =>
+              record.publish === true && record.origin.kind === "source" ||
+              record.publish === false && record.origin.kind === "registryReuse"))
+            throw new Error("Validated release inventory identity differs");
+          const policyBytes = await readFile("scripts/release-reuse-policy.json");
+          const policyDigest = digest(policyBytes);
+          if (policyDigest !== manifest.registryPolicySha256 ||
+            !manifestBytes.equals(await readFile(manifestPath)))
+            throw new Error("Release inventory changed during sealing");
+          const reuseRequired = manifest.packages.some(record => record.origin.kind === "registryReuse");
+          await appendFile(process.env.GITHUB_OUTPUT, [
+            "manifest_digest=" + manifestDigest,
+            "policy_digest=" + policyDigest,
+            "policy_base64=" + policyBytes.toString("base64"),
+            "reuse_required=" + String(reuseRequired),
+          ].join("\n") + "\n");
+          SEAL
+      - name: Upload the prepared release
+        id: upload
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: storage-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-prepared/
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 30
+      - name: Retain genuine registry reuse proof
+        if: ${{ always() && (steps.seal.outcome != 'success' || steps.seal.outputs.reuse_required != 'false') }}
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: storage-reuse-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-prepared-reuse-verification/
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 30
+      - name: Record original artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          MANIFEST_DIGEST: ${{ steps.seal.outputs.manifest_digest }}
+        run: printf 'Original artifact %s ZIP SHA256 %s manifest SHA256 %s\n' "${ARTIFACT_ID}" "${ARTIFACT_DIGEST}" "${MANIFEST_DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
 
+  smoke:
+    needs: prepare
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - name: Set up Java for DynamoDB Local
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Download the prepared release copy
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: ${{ runner.temp }}/storage-smoke
+          merge-multiple: true
       - name: Smoke-test the prepared release copy
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-smoke
         run: >-
           node scripts/release-packages.mjs smoke
-          --expected-release-commit "${RELEASE_COMMIT}"
           --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
+          --expected-release-commit "${RELEASE_COMMIT}"
+          --expected-manifest-sha256 "${EXPECTED_MANIFEST_DIGEST}"
+          --output "${RUNNER_TEMP}/storage-consumer-proof"
+      - name: Retain public consumer proof
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: storage-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-consumer-proof/
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 30
+
+  preflight:
+    needs: [prepare, smoke]
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
+      preflight-digest: ${{ steps.seal.outputs.preflight_digest }}
+    env:
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - name: Download the original prepared release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: ${{ runner.temp }}/storage-preflight-input
+          merge-multiple: true
+      - name: Verify registry preflight
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-preflight-input
+        run: >-
+          node scripts/release-registry-verify.mjs preflight
+          --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
+          --expected-release-commit "${RELEASE_COMMIT}"
+          --expected-manifest-sha256 "${EXPECTED_MANIFEST_DIGEST}"
+          --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          --output "${RUNNER_TEMP}/storage-preflight-proof"
+      - name: Seal registry preflight
+        id: seal
+        run: printf 'preflight_digest=%s\n' "$(sha256sum "${RUNNER_TEMP}/storage-preflight-proof/preflight.json" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
+      - name: Retain registry preflight
+        if: always()
+        id: upload
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: storage-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-preflight-proof/
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 30
 
   publish:
-    needs: [prepare, smoke]
+    needs: [prepare, smoke, preflight]
     runs-on: ubuntu-latest
     environment: npm-publish
     permissions:
       contents: read
       id-token: write
     env:
-      CI: "1"
-      RELEASE_TAG: ${{ github.event.release.tag_name }}
-      RELEASE_PRERELEASE: ${{ github.event.release.prerelease }}
-      RELEASE_COMMIT: ${{ github.sha }}
-      RELEASE_ALLOWED_SIGNERS: ${{ vars.RELEASE_ALLOWED_SIGNERS }}
-      REVIEWED_NPM_VERSION: "11.18.0"
-      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs['manifest-digest'] }}
-      RELEASE_DIRECTORY: ${{ github.workspace }}/storage-release
-
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
+      EXPECTED_POLICY_DIGEST: ${{ needs.prepare.outputs.policy-digest }}
+      REGISTRY_POLICY_BASE64: ${{ needs.prepare.outputs.policy-base64 }}
+      EXPECTED_PREFLIGHT_DIGEST: ${{ needs.preflight.outputs.preflight-digest }}
     steps:
       - name: Verify the release tag
         shell: bash
@@ -254,20 +365,27 @@ jobs:
         with:
           node-version: 24.18.0
           package-manager-cache: false
-
       - name: Check the npm version
         shell: bash
         run: |
           set -euo pipefail
           [[ "$(npm --version)" == "${REVIEWED_NPM_VERSION}" ]]
-
       - name: Download the prepared release
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: storage-release-${{ github.run_id }}
-          path: ${{ github.workspace }}/storage-release
-
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: ${{ runner.temp }}/storage-publish
+          merge-multiple: true
+      - name: Download sealed registry preflight
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.preflight.outputs.artifact-id }}
+          path: ${{ runner.temp }}/storage-publish-preflight
+          merge-multiple: true
       - name: Verify and publish the prepared release
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-publish
+          PREFLIGHT_DIRECTORY: ${{ runner.temp }}/storage-publish-preflight
         shell: bash
         run: |
           set -euo pipefail
@@ -276,230 +394,273 @@ jobs:
           cat > "${publisher}" <<'NODE'
           import { spawnSync } from "node:child_process";
           import { createHash, timingSafeEqual } from "node:crypto";
-          import {
-            chmod,
-            lstat,
-            mkdtemp,
-            readFile,
-            readdir,
-            rm,
-            writeFile,
-          } from "node:fs/promises";
+          import { constants } from "node:fs";
+          import { chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+          import { basename, dirname, join, resolve } from "node:path";
           import { tmpdir } from "node:os";
-          import { basename, join, resolve } from "node:path";
-
-          const registry = "https://registry.npmjs.org/";
-          const definitions = [
-            ["@pegma/storage-core", "storage-core"],
-            ["@pegma/storage-azure-tables", "storage-azure-tables"],
-            ["@pegma/storage-cloudflare-d1", "storage-cloudflare-d1"],
-            ["@pegma/storage-dynamodb", "storage-dynamodb"],
+          const repository="pegma-dev/storage-core", registry="https://registry.npmjs.org/";
+          const workflow=".github/workflows/publish.yml";
+          const definitions=[
+            ["@pegma/storage-core","storage-core"],
+            ["@pegma/storage-azure-tables","storage-azure-tables"],
+            ["@pegma/storage-cloudflare-d1","storage-cloudflare-d1"],
+            ["@pegma/storage-dynamodb","storage-dynamodb"],
           ];
-          const stableVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
-          const releaseTag = /^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$/u;
-
-          function fail(message) {
-            throw new Error(message);
+          function fail(message){throw new Error(message);}
+          function equal(a,b){if(typeof a!=="string"||typeof b!=="string")return false;const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);}
+          function digest(bytes,algorithm="sha256",encoding="hex"){return createHash(algorithm).update(bytes).digest(encoding);}
+          function exact(value,keys){if(!value||typeof value!=="object"||Array.isArray(value)||JSON.stringify(Object.keys(value).sort())!==JSON.stringify([...keys].sort()))fail("release data has invalid fields");}
+          function integer(value){if(!Number.isSafeInteger(value)||value<1)fail("release identity has an invalid integer");}
+          function originFor(entry){return {kind:"registryReuse",registry,policyEntry:entry.name+"@"+entry.version,tarballUrl:entry.tarballUrl,
+            sourceCommit:entry.sourceCommit,sourceTag:entry.sourceTag,workflowPath:entry.workflowPath,
+            originalRunId:entry.originalRunId,originalRunAttempt:entry.originalRunAttempt};}
+          function same(a,b){return JSON.stringify(a)===JSON.stringify(b);}
+          async function boundedFile(path,maximum){
+            const metadata=await lstat(path);
+            if(!metadata.isFile()||metadata.isSymbolicLink()||metadata.size<1||metadata.size>maximum||await realpath(path)!==resolve(path))fail("prepared file is invalid");
+            const handle=await open(path,constants.O_RDONLY|(constants.O_NOFOLLOW??0));
+            try{
+              const opened=await handle.stat();
+              if(opened.dev!==metadata.dev||opened.ino!==metadata.ino||opened.size!==metadata.size)fail("prepared file changed");
+              const bytes=Buffer.alloc(metadata.size+1);let length=0;
+              while(length<bytes.length){const result=await handle.read(bytes,length,bytes.length-length,length);if(!result.bytesRead)break;length+=result.bytesRead;}
+              if(length!==metadata.size)fail("prepared file changed");return bytes.subarray(0,length);
+            }finally{await handle.close();}
           }
-
-          function equal(left, right) {
-            const leftBytes = Buffer.from(left);
-            const rightBytes = Buffer.from(right);
-            return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+          let oidc;
+          try{oidc=new URL(process.env.ACTIONS_ID_TOKEN_REQUEST_URL);}catch{fail("approved OIDC environment is required");}
+          if(process.env.GITHUB_ACTIONS!=="true"||process.env.GITHUB_EVENT_NAME!=="release"||
+            process.env.GITHUB_REPOSITORY!==repository||process.env.GITHUB_SERVER_URL!=="https://github.com"||
+            process.env.GITHUB_REPOSITORY_ID!=="1312519623"||process.env.GITHUB_REPOSITORY_OWNER_ID!=="309286193"||
+            process.env.GITHUB_REF!=="refs/tags/"+process.env.RELEASE_TAG||
+            process.env.GITHUB_SHA!==process.env.RELEASE_COMMIT||process.env.GITHUB_WORKFLOW_SHA!==process.env.RELEASE_COMMIT||
+            process.env.GITHUB_WORKFLOW_REF!==repository+"/"+workflow+"@refs/tags/"+process.env.RELEASE_TAG||
+            process.env.RUNNER_ENVIRONMENT!=="github-hosted"||oidc.protocol!=="https:"||oidc.username||oidc.password||
+            !/^(?:[A-Za-z0-9-]+\.)*actions\.githubusercontent\.com$/u.test(oidc.hostname)||
+            !process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN||
+            Object.entries(process.env).some(([key,value])=>value&&/^(?:NODE_AUTH_TOKEN|NPM_TOKEN|NPM_AUTH_TOKEN|NPM_AUTH|YARN_NPM_AUTH_TOKEN|npm_config_.*)$/iu.test(key)))
+            fail("token-free github-hosted release OIDC is required");
+          const runId=Number(process.env.GITHUB_RUN_ID),runAttempt=Number(process.env.GITHUB_RUN_ATTEMPT);integer(runId);integer(runAttempt);
+          const releaseDirectory=resolve(process.env.RELEASE_DIRECTORY);
+          const manifestBytes=await boundedFile(join(releaseDirectory,"package-manifest.json"),1024*1024);
+          if(!/^[a-f0-9]{64}$/u.test(process.env.EXPECTED_MANIFEST_DIGEST??"")||
+            !equal(digest(manifestBytes),process.env.EXPECTED_MANIFEST_DIGEST))fail("independent manifest digest differs");
+          const manifest=JSON.parse(manifestBytes);
+          exact(manifest,["schemaVersion","repository","gitCommit","releaseTag","registryPolicySha256","packages"]);
+          if(manifest.schemaVersion!==2||manifest.repository!==repository||manifest.gitCommit!==process.env.RELEASE_COMMIT||
+            manifest.releaseTag!==process.env.RELEASE_TAG||!/^v(0\.[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)\.[0-9]+$/u.test(manifest.releaseTag)||
+            !Array.isArray(manifest.packages)||manifest.packages.length!==4)fail("prepared release identity differs");
+          const policyBytes=Buffer.from(process.env.REGISTRY_POLICY_BASE64??"","base64");
+          if(policyBytes.length>32768||!equal(digest(policyBytes),process.env.EXPECTED_POLICY_DIGEST)||
+            !equal(digest(policyBytes),manifest.registryPolicySha256))fail("independent registry policy differs");
+          const policy=JSON.parse(policyBytes);
+          exact(policy,["schemaVersion","repository","repositoryId","ownerId","builder","packages"]);
+          if(policy.schemaVersion!==1||policy.repository!==repository||policy.repositoryId!=="1312519623"||
+            policy.ownerId!=="309286193"||policy.builder!=="https://github.com/actions/runner/github-hosted"||
+            !Array.isArray(policy.packages)||policy.packages.length>definitions.length)fail("registry policy identity differs");
+          let previousPolicyIndex=-1;
+          for(const entry of policy.packages){
+            exact(entry,["name","version","directory","tarballUrl","size","sha256","integrity","shasum",
+              "sourceCommit","sourceTag","workflowPath","originalRunId","originalRunAttempt"]);
+            const index=definitions.findIndex(([name])=>name===entry.name);
+            if(index<=previousPolicyIndex||entry.directory!==definitions[index]?.[1]||
+              !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(entry.version)||
+              entry.tarballUrl!==registry+entry.name+"/-/"+entry.directory+"-"+entry.version+".tgz"||
+              !/^[a-f0-9]{64}$/u.test(entry.sha256)||!/^[a-f0-9]{40}$/u.test(entry.shasum)||
+              !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(entry.integrity)||
+              !/^[a-f0-9]{40}$/u.test(entry.sourceCommit)||entry.sourceTag!=="v"+entry.version||
+              entry.workflowPath!==workflow)fail("registry policy entry differs");
+            integer(entry.size);integer(entry.originalRunId);integer(entry.originalRunAttempt);
+            if(entry.size>4*1024*1024)fail("registry policy archive is too large");
+            previousPolicyIndex=index;
           }
-
-          const releaseDirectory = resolve(process.env.RELEASE_DIRECTORY);
-          const manifestPath = join(releaseDirectory, "package-manifest.json");
-          const manifestBytes = await readFile(manifestPath);
-          const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
-          const expectedManifestDigest = process.env.EXPECTED_MANIFEST_DIGEST ?? "";
-          if (!/^[0-9a-f]{64}$/u.test(expectedManifestDigest)) {
-            fail("prepared manifest digest is missing or invalid");
+          if(manifest.packages.some(record=>!record?.publish&&!policy.packages.some(entry=>
+            entry.name===record?.name&&entry.version===record?.version)))fail("unselected package policy is missing");
+          const expectedFiles=["package-manifest.json",...manifest.packages.map(record=>record.tarball)].sort();
+          const entries=await readdir(releaseDirectory,{withFileTypes:true});
+          if(!same(entries.map(entry=>entry.name).sort(),expectedFiles)||entries.some(entry=>!entry.isFile()||entry.name.startsWith(".")))fail("original five-file inventory differs");
+          const versions=new Map(manifest.packages.map(record=>[record.name,record.version]));
+          let selected=0;
+          for(const [index,record] of manifest.packages.entries()){
+            exact(record,["name","version","directory","tarball","size","shasum","sha256","integrity","publish","files","package","origin"]);
+            const [name,directory]=definitions[index];
+            if(record.name!==name||record.directory!==directory||! /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(record.version)||
+              record.tarball!==name.slice(1).replace("/","-")+"-"+record.version+".tgz"||basename(record.tarball)!==record.tarball||
+              !Number.isSafeInteger(record.size)||record.size<1||record.size>4*1024*1024||
+              !/^[a-f0-9]{64}$/u.test(record.sha256)||!/^[a-f0-9]{40}$/u.test(record.shasum)||
+              !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(record.integrity)||typeof record.publish!=="boolean"||
+              record.package?.name!==name||record.package.version!==record.version||record.package.license!=="MIT"||
+              record.package.type!=="module"||record.package.publishConfig?.access!=="public"||
+              record.package.repository?.url!=="git+https://github.com/"+repository+".git"||
+              record.package.repository?.directory!=="packages/"+directory)fail("prepared package metadata differs");
+            if(record.publish){
+              selected++;
+              if(!same(record.origin,{kind:"source",repository,gitCommit:manifest.gitCommit,releaseTag:manifest.releaseTag,directory})||
+                record.version!==manifest.releaseTag.slice(1))fail("source origin differs");
+            }else{
+              const entry=policy.packages.find(entry=>entry.name===name&&entry.version===record.version);
+              if(!entry||!same(record.origin,originFor(entry))||record.version===manifest.releaseTag.slice(1)||
+                record.size!==entry.size||!equal(record.sha256,entry.sha256)||!equal(record.integrity,entry.integrity)||
+                !equal(record.shasum,entry.shasum))fail("original registry origin differs");
+            }
+            for(const section of ["dependencies","devDependencies","optionalDependencies","peerDependencies"])
+              for(const [dependency,version] of Object.entries(record.package[section]??{}))
+                if(versions.has(dependency)&&version!==versions.get(dependency))fail("internal dependency pin differs");
+            const bytes=await boundedFile(join(releaseDirectory,record.tarball),4*1024*1024);
+            if(bytes.length!==record.size||!equal(digest(bytes),record.sha256)||!equal(digest(bytes,"sha1"),record.shasum)||
+              !equal("sha512-"+digest(bytes,"sha512","base64"),record.integrity))fail("original artifact bytes differ");
           }
-          if (!equal(manifestDigest, expectedManifestDigest)) {
-            fail("prepared manifest digest does not match");
-          }
-          const manifest = JSON.parse(manifestBytes.toString("utf8"));
-          if (
-            JSON.stringify(Object.keys(manifest).sort()) !==
-              JSON.stringify(["gitCommit", "packages", "releaseTag", "schemaVersion"]) ||
-            manifest.schemaVersion !== 1 ||
-            manifest.gitCommit !== process.env.RELEASE_COMMIT ||
-            manifest.releaseTag !== process.env.RELEASE_TAG ||
-            !releaseTag.test(manifest.releaseTag) ||
-            !Array.isArray(manifest.packages) ||
-            manifest.packages.length !== definitions.length
-          ) {
-            fail("prepared manifest header is invalid");
-          }
-
-          const expectedFiles = ["package-manifest.json", ...manifest.packages.map(({ tarball }) => tarball)].sort();
-          const entries = await readdir(releaseDirectory, { withFileTypes: true });
-          if (JSON.stringify(entries.map(({ name }) => name).sort()) !== JSON.stringify(expectedFiles)) {
-            fail("prepared release inventory is invalid");
-          }
-          for (const entry of entries) {
-            const details = await lstat(join(releaseDirectory, entry.name));
-            if (entry.name.startsWith(".") || !entry.isFile() || details.isSymbolicLink()) {
-              fail("prepared release inventory must contain regular files only");
+          if(!selected)fail("release has no source packages");
+          const preflightDirectory=resolve(process.env.PREFLIGHT_DIRECTORY);
+          const preflightBytes=await boundedFile(join(preflightDirectory,"preflight.json"),4*1024*1024);
+          if(!/^[a-f0-9]{64}$/u.test(process.env.EXPECTED_PREFLIGHT_DIGEST??"")||
+            !equal(digest(preflightBytes),process.env.EXPECTED_PREFLIGHT_DIGEST))fail("independent preflight digest differs");
+          const preflight=JSON.parse(preflightBytes);
+          exact(preflight,["schemaVersion","repository","gitCommit","releaseTag","manifestSha256","runId","runAttempt","decisions","registryProof"]);
+          if(preflight.schemaVersion!==1||preflight.repository!==repository||preflight.gitCommit!==manifest.gitCommit||
+            preflight.releaseTag!==manifest.releaseTag||preflight.manifestSha256!==process.env.EXPECTED_MANIFEST_DIGEST||
+            preflight.runId!==runId||!Number.isSafeInteger(preflight.runAttempt)||preflight.runAttempt<1||preflight.runAttempt>runAttempt||
+            !Array.isArray(preflight.decisions)||preflight.decisions.length!==4||
+            preflight.registryProof?.status!=="REGISTRY_BYTES_CRYPTO_SOURCE_PASS"||
+            preflight.registryProof.npmVersion!=="11.18.0"||preflight.registryProof.policySha256!==manifest.registryPolicySha256||
+            !equal(preflight.registryProof.auditSha256,digest(await boundedFile(join(preflightDirectory,"npm-audit-signatures.json"),32*1024*1024))))
+            fail("authenticated whole-set preflight binding differs");
+          for(const [index,record] of manifest.packages.entries()){
+            const decision=preflight.decisions[index];exact(decision,["name","version","action"]);
+            if(decision.name!==record.name||decision.version!==record.version||!["skip","publish"].includes(decision.action)||
+              !record.publish&&decision.action!=="skip")fail("preflight decision differs");
+            if(decision.action==="skip"){
+              const facts=preflight.registryProof.packages?.filter(fact=>fact.name===record.name&&fact.version===record.version);
+              if(facts?.length!==1)fail("preflight authenticated package fact is missing");
+              const fact=facts[0], origin=record.origin;
+              if(fact.sourceCommit!==(record.publish?manifest.gitCommit:origin.sourceCommit)||
+                fact.sourceTag!==(record.publish?manifest.releaseTag:origin.sourceTag)||
+                fact.runId!==(record.publish?runId:origin.originalRunId)||
+                !Number.isSafeInteger(fact.attempt)||fact.attempt<1||
+                (record.publish?fact.attempt>runAttempt:fact.attempt!==origin.originalRunAttempt))
+                fail("preflight authenticated original writer differs");
             }
           }
-
-          const tagVersion = manifest.releaseTag.slice(1);
-          const packageVersions = new Map(manifest.packages.map(({ name, version }) => [name, version]));
-          let selected = 0;
-          for (const [index, record] of manifest.packages.entries()) {
-            const [name, directory] = definitions[index];
-            const expectedTarball = `${name.slice(1).replace("/", "-")}-${record.version}.tgz`;
-            if (
-              JSON.stringify(Object.keys(record).sort()) !==
-                JSON.stringify(["directory", "files", "integrity", "name", "package", "publish", "sha256", "shasum", "tarball", "version"]) ||
-              record.name !== name ||
-              record.directory !== directory ||
-              !stableVersion.test(record.version) ||
-              record.tarball !== expectedTarball ||
-              basename(record.tarball) !== record.tarball ||
-              record.publish !== (record.version === tagVersion) ||
-              !/^[0-9a-f]{64}$/u.test(record.sha256) ||
-              !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(record.integrity) ||
-              !/^[0-9a-f]{40}$/u.test(record.shasum) ||
-              !Array.isArray(record.files) ||
-              record.package?.name !== record.name ||
-              record.package?.version !== record.version ||
-              record.package?.license !== "MIT" ||
-              record.package?.type !== "module" ||
-              record.package?.publishConfig?.access !== "public" ||
-              record.package?.repository?.url !== "git+https://github.com/pegma-dev/storage-core.git" ||
-              record.package?.repository?.directory !== `packages/${directory}` ||
-              record.files.some(
-                (file) =>
-                  file === null ||
-                  typeof file !== "object" ||
-                  typeof file.path !== "string" ||
-                  !Number.isSafeInteger(file.size) ||
-                  file.size < 0,
-              )
-            ) {
-              fail(`prepared metadata for ${name} is invalid`);
-            }
-            selected += record.publish ? 1 : 0;
-            for (const section of ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"]) {
-              for (const [dependency, version] of Object.entries(record.package[section] ?? {})) {
-                if (packageVersions.has(dependency) && version !== packageVersions.get(dependency)) {
-                  fail(`${record.name} has an invalid internal dependency pin`);
-                }
-              }
-            }
-            const tarballPath = join(releaseDirectory, record.tarball);
-            const tarball = await readFile(tarballPath);
-            const sha256 = createHash("sha256").update(tarball).digest("hex");
-            const sha512 = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
-            const shasum = createHash("sha1").update(tarball).digest("hex");
-            if (!equal(sha256, record.sha256) || !equal(sha512, record.integrity) || !equal(shasum, record.shasum)) {
-              fail(`${record.name} tarball digest does not match`);
-            }
-            record.tarballPath = tarballPath;
-          }
-          if (selected === 0) {
-            fail("prepared manifest has no release candidates");
-          }
-
-          const configDirectory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "npm-config-"));
-          await chmod(configDirectory, 0o700);
-          const userConfig = join(configDirectory, "userconfig");
-          const globalConfig = join(configDirectory, "globalconfig");
-          await writeFile(userConfig, "", { mode: 0o600 });
-          await writeFile(globalConfig, "", { mode: 0o600 });
-          await chmod(userConfig, 0o600);
-          await chmod(globalConfig, 0o600);
-
-          function npmEnvironment() {
-            const selectedEnvironment = {};
-            const exact = new Set(["PATH", "HOME", "CI", "SYSTEMROOT", "RUNNER_TEMP", "RUNNER_TOOL_CACHE", "TEMP", "TMP", "TMPDIR"]);
-            for (const [key, value] of Object.entries(process.env)) {
-              const upper = key.toUpperCase();
-              if (exact.has(upper) || upper.startsWith("GITHUB_") || upper.startsWith("ACTIONS_ID_TOKEN_")) {
-                selectedEnvironment[key] = value;
-              }
-            }
-            selectedEnvironment.NPM_CONFIG_USERCONFIG = userConfig;
-            selectedEnvironment.NPM_CONFIG_GLOBALCONFIG = globalConfig;
+          const configDirectory=await mkdtemp(join(process.env.RUNNER_TEMP??tmpdir(),"npm-config-"));
+          await chmod(configDirectory,0o700);
+          const userConfig=join(configDirectory,"userconfig"),globalConfig=join(configDirectory,"globalconfig");
+          await writeFile(userConfig,"",{mode:0o600});await writeFile(globalConfig,"",{mode:0o600});
+          function npmEnvironment(){
+            const selectedEnvironment={};
+            const exact=new Set(["PATH","HOME","CI","SYSTEMROOT","TEMP","TMP","TMPDIR","RUNNER_TEMP","RUNNER_TOOL_CACHE",
+              "GITHUB_ACTIONS","GITHUB_EVENT_NAME","GITHUB_REPOSITORY","GITHUB_REPOSITORY_ID","GITHUB_REPOSITORY_OWNER_ID",
+              "GITHUB_SERVER_URL","GITHUB_REF","GITHUB_SHA","GITHUB_WORKFLOW_REF","GITHUB_WORKFLOW_SHA","GITHUB_RUN_ID",
+              "GITHUB_RUN_ATTEMPT","RUNNER_ENVIRONMENT","ACTIONS_ID_TOKEN_REQUEST_URL","ACTIONS_ID_TOKEN_REQUEST_TOKEN"]);
+            for(const [key,value] of Object.entries(process.env))if(exact.has(key.toUpperCase()))selectedEnvironment[key]=value;
+            selectedEnvironment.NPM_CONFIG_USERCONFIG=userConfig;selectedEnvironment.NPM_CONFIG_GLOBALCONFIG=globalConfig;
+            selectedEnvironment.NPM_CONFIG_IGNORE_SCRIPTS="true";selectedEnvironment.NPM_CONFIG_REGISTRY=registry;
             return selectedEnvironment;
           }
-
-          function npm(arguments_, options = {}) {
-            const result = spawnSync("npm", arguments_, {
-              cwd: options.cwd,
-              encoding: "utf8",
-              env: npmEnvironment(),
-              stdio: options.inherit ? "inherit" : "pipe",
-            });
-            if (result.error) throw result.error;
-            if (result.status !== 0 && !options.allowFailure) fail(`npm ${arguments_.join(" ")} failed`);
-            return result;
+          function npm(args,cwd,inherit=false){
+            const result=spawnSync("npm",args,{cwd,encoding:"utf8",env:npmEnvironment(),shell:false,stdio:inherit?"inherit":"pipe",timeout:120000,maxBuffer:4*1024*1024});
+            if(result.error||result.status!==0)fail("reviewed npm operation failed");return result.stdout;
           }
-
-          const npmVersion = npm(["--version"]).stdout.trim();
-          const npmMatch = /^(\d+)\.(\d+)\.(\d+)(?:-.+)?$/u.exec(npmVersion);
-          if (
-            npmMatch === null ||
-            Number(npmMatch[1]) < 11 ||
-            (Number(npmMatch[1]) === 11 && Number(npmMatch[2]) < 5) ||
-            (Number(npmMatch[1]) === 11 && Number(npmMatch[2]) === 5 && Number(npmMatch[3]) < 1)
-          ) {
-            fail("npm 11.5.1 or newer is required");
-          }
-
-          function registryIntegrity(record) {
-            const specifier = `${record.name}@${record.version}`;
-            const result = npm(["view", specifier, "dist.integrity", "--json", "--registry", registry], { allowFailure: true });
-            if (result.status === 0) {
-              const value = JSON.parse(result.stdout);
-              if (typeof value !== "string" || value.length === 0) fail(`${specifier} exists without registry integrity`);
-              return value;
+          async function registryState(record){
+            const options={redirect:"error",signal:AbortSignal.timeout(30000)};
+            const response=await fetch(registry+encodeURIComponent(record.name)+"/"+record.version,options);
+            if(response.status===404){await response.body?.cancel();return "absent";}
+            if(response.status!==200)fail("registry availability is unknown");
+            async function bounded(response,maximum){
+              let size=0;const chunks=[];
+              for await(const chunk of response.body){size+=chunk.length;if(size>maximum)fail("registry response exceeded its bound");chunks.push(Buffer.from(chunk));}
+              return Buffer.concat(chunks,size);
             }
-            const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-            if (/\bE404\b/u.test(output)) return null;
-            fail(`registry lookup failed for ${specifier}`);
+            const metadata=JSON.parse((await bounded(response,2*1024*1024)).toString("utf8"));
+            const url=registry+record.name+"/-/"+record.name.split("/")[1]+"-"+record.version+".tgz";
+            if(metadata.name!==record.name||metadata.version!==record.version||
+              !equal(metadata.dist?.integrity,record.integrity)||!equal(metadata.dist?.shasum,record.shasum)||metadata.dist?.tarball!==url)
+              fail("registry metadata conflicts with original archive");
+            const tar=await fetch(url,options);
+            if(tar.status===404){await tar.body?.cancel();return "pending";}
+            if(tar.status!==200)fail("canonical registry bytes are unavailable");
+            const bytes=await bounded(tar,record.size);
+            if(bytes.length!==record.size||!equal(digest(bytes),record.sha256)||
+              !equal("sha512-"+digest(bytes,"sha512","base64"),record.integrity))fail("canonical registry bytes differ");
+            return "present";
           }
-
-          const pause = (milliseconds) => new Promise((resolvePause) => setTimeout(resolvePause, milliseconds));
-          try {
-            for (const record of manifest.packages.filter(({ publish }) => publish)) {
-              const existing = registryIntegrity(record);
-              if (existing !== null) {
-                if (!equal(existing, record.integrity)) fail(`${record.name}@${record.version} has different registry integrity`);
-                process.stdout.write(`Verified existing ${record.name}@${record.version}; skipping.\n`);
-                continue;
-              }
-              const publishDirectory = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), "npm-publish-"));
-              try {
-                npm([
-                  "publish",
-                  record.tarballPath,
-                  "--access",
-                  "public",
-                  "--provenance",
-                  "--ignore-scripts",
-                  "--registry",
-                  registry,
-                ], { cwd: publishDirectory, inherit: true });
-              } finally {
-                await rm(publishDirectory, { recursive: true, force: true });
-              }
-              let confirmed = false;
-              for (let attempt = 0; attempt < 6; attempt += 1) {
-                const published = registryIntegrity(record);
-                if (published !== null && equal(published, record.integrity)) {
-                  confirmed = true;
-                  break;
-                }
-                if (attempt < 5) await pause(2 ** attempt * 1000);
-              }
-              if (!confirmed) fail(`${record.name}@${record.version} did not become visible`);
+          try{
+            if(npm(["--version"],configDirectory).trim()!=="11.18.0")fail("reviewed npm version differs");
+            const states=[];
+            for(const record of manifest.packages)states.push(await registryState(record));
+            for(const [index,record] of manifest.packages.entries()){
+              const decision=preflight.decisions[index].action,state=states[index];
+              if(decision==="skip"&&state!=="present")fail("qualified registry artifact is no longer available");
+              if(decision==="publish"&&state!=="absent")fail("registry occupancy changed; rerun unprivileged preflight using the original artifact");
             }
-          } finally {
-            await rm(configDirectory, { recursive: true, force: true });
-          }
+            for(const [index,record] of manifest.packages.entries()){
+              if(!record.publish||preflight.decisions[index].action==="skip"){
+                process.stdout.write("Verified original registry artifact "+record.name+"@"+record.version+"; skipping.\n");continue;
+              }
+              const current=await registryState(record);
+              if(current!=="absent")fail("registry occupancy changed; fresh authenticated preflight is required");
+              const publishDirectory=await mkdtemp(join(process.env.RUNNER_TEMP??tmpdir(),"npm-publish-"));
+              try{
+                const destination=join(publishDirectory,record.tarball);
+                await copyFile(join(releaseDirectory,record.tarball),destination);
+                if(!equal(digest(await boundedFile(destination,4*1024*1024)),record.sha256))fail("publish copy changed");
+                npm(["publish",destination,"--access","public","--provenance","--ignore-scripts","--registry",registry],publishDirectory,true);
+              }finally{await rm(publishDirectory,{recursive:true,force:true});}
+              let visible=false;
+              for(let attempt=0;attempt<6;attempt++){
+                if(await registryState(record)==="present"){visible=true;break;}
+                if(attempt<5)await new Promise(resolvePause=>setTimeout(resolvePause,2**attempt*1000));
+              }
+              if(!visible)fail("published integrity did not become visible; retain original artifact and refresh unprivileged preflight");
+            }
+          }finally{await rm(configDirectory,{recursive:true,force:true});}
           NODE
           node "${publisher}"
+
+  verify:
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    env:
+      EXPECTED_MANIFEST_DIGEST: ${{ needs.prepare.outputs.manifest-digest }}
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.18.0
+          package-manager-cache: false
+      - name: Set up Java for DynamoDB Local
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Download the original prepared release
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          path: ${{ runner.temp }}/storage-final-input
+          merge-multiple: true
+      - name: Verify registry bytes provenance and consumer
+        env:
+          RELEASE_DIRECTORY: ${{ runner.temp }}/storage-final-input
+        run: >-
+          node scripts/release-registry-verify.mjs verify
+          --manifest "${RELEASE_DIRECTORY}/package-manifest.json"
+          --expected-release-commit "${RELEASE_COMMIT}"
+          --expected-manifest-sha256 "${EXPECTED_MANIFEST_DIGEST}"
+          --run-id "${GITHUB_RUN_ID}" --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          --output "${RUNNER_TEMP}/storage-final-proof"
+      - name: Retain final registry proof
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: storage-final-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/storage-final-proof/
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 30

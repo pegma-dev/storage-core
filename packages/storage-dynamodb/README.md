@@ -3,6 +3,13 @@
 Amazon DynamoDB adapter for
 [`@pegma/storage-core`](https://www.npmjs.com/package/@pegma/storage-core).
 
+Source `0.4.3` is the unpublished first trusted runtime candidate and pins
+released Core `0.4.0`. Version `0.4.2` is reserved for registration-only metadata,
+with no runtime exports/scripts/dependencies; it is not this adapter or a host
+dependency. Source merge and metadata registration do not establish publication,
+registry provenance or host acceptance. See the
+[release policy](https://github.com/pegma-dev/storage-core/blob/main/docs/RELEASING.md).
+
 It stores every collection in one DynamoDB table. The hash key is the
 collection name and the range key is `<partition>` + unit separator +
 `<id>`. Record bodies are stored as JSON; optimistic concurrency uses a UUID
@@ -105,9 +112,12 @@ required by `@pegma/storage-core`.
 
 ## Verification
 
-This adapter passes the conformance suite published by `@pegma/storage-core`,
-run against Amazon DynamoDB Local rather than a fake client. An adapter that
-agrees only with its author's assumptions is not verified.
+Required verification runs conformance against Amazon DynamoDB Local rather
+than a fake client. The release consumer uses actual published Core `0.4.0`
+and the selected DynamoDB artifact, including real `StorageError` and
+`ConcurrencyError` identity. Qualified publication additionally requires exact
+registry bytes, authenticated signatures/provenance and a clean public consumer;
+neither source tests nor namespace registration replace those gates.
 
 ## License
 

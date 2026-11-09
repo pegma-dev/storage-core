@@ -45,6 +45,7 @@ const DOWNLOAD_TIMEOUT_MS = 120_000;
 const TARBALL_PATH_ENV = "PEGMA_DYNAMODB_LOCAL_TARBALL_PATH";
 
 let child: ChildProcess | undefined;
+let childClosed: Promise<Error | undefined> | undefined;
 let distribution: string | undefined;
 let privateArchiveDirectory: string | undefined;
 let verifiedTarball: string | undefined;
@@ -219,16 +220,42 @@ export async function setup(): Promise<void> {
     },
   );
 
-  child.once("error", (error) => {
-    throw error;
+  const ownedChild = child;
+  // Observe close now, including a child that exits before teardown starts.
+  // Store errors as outcomes so they cannot reject before teardown awaits them.
+  childClosed = new Promise((resolve) => {
+    ownedChild.once("close", () => resolve(undefined));
+    ownedChild.once("error", (error) => resolve(error));
   });
 
   await waitForPort(DYNAMODB_PORT, 30_000);
 }
 
 export async function teardown(): Promise<void> {
-  child?.kill();
-  child = undefined;
+  if (child !== undefined) {
+    const ownedChild = child;
+    if (childClosed === undefined) {
+      throw new Error("DynamoDB Local child close observation is missing.");
+    }
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const expired = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          reject(new Error("DynamoDB Local did not close within 10000ms."));
+        }, 10_000);
+      });
+      if (ownedChild.exitCode === null && ownedChild.signalCode === null) {
+        ownedChild.kill();
+      }
+      const error = await Promise.race([childClosed, expired]);
+      if (error !== undefined) throw error;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+    // Only a confirmed close releases ownership and permits directory removal.
+    child = undefined;
+    childClosed = undefined;
+  }
   if (distribution !== undefined) {
     await rm(distribution, { recursive: true, force: true });
     distribution = undefined;
