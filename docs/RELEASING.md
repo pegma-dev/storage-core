@@ -7,11 +7,13 @@ below is an explicit first-package exception, not a runtime release path.
 
 ## Current versions and source ownership
 
-Core and Azure are published at `0.4.0`; D1 at `0.4.1`. DynamoDB `0.4.2` is reserved for
-registration-only metadata, and `0.4.3` is the unpublished first trusted runtime
-candidate. Registration is not adapter code, conformance evidence or a production
-dependency. Do not claim an actual registration or release until its public
-registry evidence exists.
+Core and Azure are published at `0.4.0`; D1 at `0.4.1`. DynamoDB `0.4.2` is
+published registration-only metadata, and `0.4.4` is the unpublished first trusted
+runtime candidate. The `v0.4.3` release attempt failed its npm-version check
+before preparation: no runtime archive was produced or published. Its signed
+tag remains immutable; preserve the release as a failed attempt. Registration is
+not adapter code, conformance
+evidence or a production dependency; runtime qualification remains pending.
 
 Unversioned Core/Azure/D1 changes in current source are **not** the code published
 at those versions. Schema 2 deliberately selects source artifacts by the new tag
@@ -22,9 +24,8 @@ no Core or host upgrade is implied.
 
 Versions are independently assigned but release tags share a repository-wide
 namespace. Never reuse or move a tag/version, including failed publication or
-registration versions. First trusted DynamoDB is planned as `v0.4.3`; the separate
-later D1 feature must allocate a fresh unused version, such as `0.4.4`, after rebase
-and review.
+registration versions. First trusted DynamoDB is now planned as `v0.4.4`; the
+separate later D1 feature is planned as `0.4.5`, after rebase and its own review.
 
 ## Required configuration
 
@@ -46,22 +47,22 @@ export refuse before I/O and direct the owner to the protected workflow.
 
 ## DynamoDB namespace registration
 
-After the policy PR, full gates and normal merge, the maintainer may create and
-verify the signed v0.4.3 source tag without creating its GitHub release yet.
-That approved immutable source guards the separate registration preparation.
-
-A registration-only `@pegma/storage-dynamodb@0.4.2` archive contains exactly
+The published registration-only `@pegma/storage-dynamodb@0.4.2` archive contains exactly
 package.json, README.md and LICENSE. It has no exports/main/module/types/bin,
 runtime files, scripts or dependencies of any kind. Metadata/README say that it
 only registers the namespace, is not an SDK and has no OIDC provenance. Inspect
-and retain its exact bytes/digests before an explicit maintainer 2FA publication
-under bootstrap; never install it for a backend/host proof or describe it as the
+and retain its exact bytes/digests and the maintainer's bootstrap publication
+record; never install it for a backend/host proof or describe it as the
 latest runtime. Inspect actual registry bytes/dist-tags afterward. No GitHub
 v0.4.2 release is needed.
 
-Then configure and verify trusted publishing and package/account restrictions.
-Create the v0.4.3 GitHub release only when this configuration is complete. Never
-manually publish the real `0.4.3` artifact first: immutable bytes with missing trusted
+Verify trusted publishing and package/account restrictions again for the fresh
+runtime candidate. After the corrected source passes full gates and merges,
+create and verify its signed annotated `v0.4.4` tag on `origin/main`; create its
+GitHub release only when this configuration is complete. Do not move or reuse
+the signed `v0.4.3` tag; retain its release as a failed attempt.
+Never manually publish the real `0.4.4` artifact
+first: immutable bytes with missing trusted
 provenance cannot later be repaired by a skip. Registration `0.4.2` remains immutable
 and explicitly outside runtime qualification.
 
@@ -98,7 +99,7 @@ original invocation and github-hosted builder. Raw outputs and locks are retaine
 outside the five-file release inventory. Decoding an attestation is not
 cryptographic verification.
 
-Old schema 1 releases and tags remain immutable. New producer code rejects their
+Old schema 1 archives and signed tags remain immutable. New producer code rejects their
 schema rather than guessing an origin. Recover an old release using its original
 reviewed producer and retained artifacts; do not repack or rewrite historical
 tags under schema 2.
@@ -109,6 +110,14 @@ Run formatting, types, all tests and release metadata on actual Node 22 and 24.
 Tests use real Azurite, local Miniflare D1 and Amazon DynamoDB Local with Java 21.
 The release workflow verifies the signed stable event identity before source
 execution, then runs both Node validation lanes before preparation.
+
+Before the npm-version checks in both preparation and publication, the workflow
+downloads the official npm `11.18.0` archive into an owned temporary directory,
+verifies its pinned SHA-256 and extracts it. A private launcher invokes the exact
+Node executable and that archive's `bin/npm-cli.js`; the stock `bin/npm` wrapper
+can instead select Node's global npm. Neither job changes the global npm
+installation. The publisher still installs no package dependencies and executes
+no release-tag or package-source code.
 
 Preparation requires a clean checkout at the signed annotated tag, exact event
 commit and origin/main ancestry. The selected runtime comes from that source;
@@ -158,8 +167,8 @@ Publisher validates the independently sealed original manifest, policy and
 preflight receipts again. It receives only verified original archives and
 publishes only selected source tar paths from a fresh private directory, with
 ignore-scripts, explicit official registry and provenance. Reused packages are
-never republished. Package imports and crypto tool installation remain outside
-OIDC authority.
+never republished. Consumer package imports and signature/provenance auditing
+remain outside OIDC authority.
 
 The verified npm tool is exactly `11.18.0`. By default, unprivileged verification
 authenticates the pinned official archive digest, extracts its bounded regular
@@ -168,7 +177,7 @@ discover or execute host-bundled npm, whose legitimate extra `.bin` links are
 outside the original archive. An explicit `npmCli`/`RELEASE_NPM_CLI` remains a
 strict reviewed path: every file must match the verified official tree, without
 links or extra files, before execution. The minimal OIDC publisher still installs
-nothing and uses its separately pinned Node/npm runtime.
+no package dependencies and uses the separately verified CLI described above.
 Raw audit output is retained before any public consumer import, and its hashes
 are checked afterward. Never let a caller-provided qualified boolean or decoded
 bundle substitute for that actual cryptographic command.

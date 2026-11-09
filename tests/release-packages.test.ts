@@ -91,14 +91,14 @@ describe("release package metadata", () => {
       scripts?: { prepack?: string };
     }>;
 
-    // Core/Azure040 and D1041 retain their original registry bytes. Dynamo043
+    // Core/Azure040 and D1041 retain their original registry bytes. Dynamo044
     // is the reviewed runtime candidate; registration-only042 is no SDK.
     // Every adapter pins the port exactly where it was published.
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
       { name: "@pegma/storage-cloudflare-d1", version: "0.4.1" },
-      { name: "@pegma/storage-dynamodb", version: "0.4.3" },
+      { name: "@pegma/storage-dynamodb", version: "0.4.4" },
     ]);
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
@@ -633,11 +633,13 @@ async function preparedSchema2() {
   );
   const bytes = sourceArchive(metadata),
     inspected = inspectReleaseTarball(bytes);
-  const tarball = "pegma-storage-dynamodb-0.4.3.tgz";
+  const version = inspected.package.version;
+  const releaseTag = `v${version}`;
+  const tarball = `pegma-storage-dynamodb-${version}.tgz`;
   writeFileSync(join(output, tarball), bytes);
   packages.push({
     name: "@pegma/storage-dynamodb",
-    version: "0.4.3",
+    version,
     directory: "storage-dynamodb",
     tarball,
     size: bytes.length,
@@ -651,7 +653,7 @@ async function preparedSchema2() {
       kind: "source",
       repository: "pegma-dev/storage-core",
       gitCommit,
-      releaseTag: "v0.4.3",
+      releaseTag,
       directory: "storage-dynamodb",
     },
   });
@@ -659,7 +661,7 @@ async function preparedSchema2() {
     schemaVersion: 2,
     repository: "pegma-dev/storage-core",
     gitCommit,
-    releaseTag: "v0.4.3",
+    releaseTag,
     registryPolicySha256,
     packages,
   };

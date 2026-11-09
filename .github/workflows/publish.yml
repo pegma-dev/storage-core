@@ -127,6 +127,32 @@ jobs:
         with:
           node-version: 24.18.0
           package-manager-cache: false
+      - name: Bootstrap the reviewed npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          npm_directory="$(mktemp -d "${RUNNER_TEMP}/reviewed-npm.XXXXXX")"
+          npm_archive="${npm_directory}/npm-11.18.0.tgz"
+          node_path="$(command -v node)"
+          [[ "${node_path}" == /* && -f "${node_path}" && -x "${node_path}" ]]
+          curl --disable --fail --silent --show-error --proto '=https' --proxy '' \
+            --max-time 60 --max-filesize 16777216 \
+            --output "${npm_archive}" \
+            'https://registry.npmjs.org/npm/-/npm-11.18.0.tgz'
+          printf '%s  %s\n' \
+            '73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e' \
+            "${npm_archive}" | sha256sum --check --status
+          tar --extract --gzip --file "${npm_archive}" --directory "${npm_directory}" \
+            --no-same-owner --no-same-permissions
+          npm_cli="${npm_directory}/package/bin/npm-cli.js"
+          [[ -f "${npm_cli}" && ! -L "${npm_cli}" ]]
+          mkdir "${npm_directory}/bin"
+          # The archive's bin/npm selects Node's global npm; bypass that wrapper.
+          printf '#!/bin/bash\nexec %q %q "$@"\n' "${node_path}" "${npm_cli}" \
+            > "${npm_directory}/bin/npm"
+          chmod 0700 "${npm_directory}/bin/npm"
+          printf '%s\n' "${npm_directory}/bin" >> "${GITHUB_PATH}"
       - name: Check the npm version
         shell: bash
         run: |
@@ -365,6 +391,32 @@ jobs:
         with:
           node-version: 24.18.0
           package-manager-cache: false
+      - name: Bootstrap the reviewed npm CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          npm_directory="$(mktemp -d "${RUNNER_TEMP}/reviewed-npm.XXXXXX")"
+          npm_archive="${npm_directory}/npm-11.18.0.tgz"
+          node_path="$(command -v node)"
+          [[ "${node_path}" == /* && -f "${node_path}" && -x "${node_path}" ]]
+          curl --disable --fail --silent --show-error --proto '=https' --proxy '' \
+            --max-time 60 --max-filesize 16777216 \
+            --output "${npm_archive}" \
+            'https://registry.npmjs.org/npm/-/npm-11.18.0.tgz'
+          printf '%s  %s\n' \
+            '73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e' \
+            "${npm_archive}" | sha256sum --check --status
+          tar --extract --gzip --file "${npm_archive}" --directory "${npm_directory}" \
+            --no-same-owner --no-same-permissions
+          npm_cli="${npm_directory}/package/bin/npm-cli.js"
+          [[ -f "${npm_cli}" && ! -L "${npm_cli}" ]]
+          mkdir "${npm_directory}/bin"
+          # The archive's bin/npm selects Node's global npm; bypass that wrapper.
+          printf '#!/bin/bash\nexec %q %q "$@"\n' "${node_path}" "${npm_cli}" \
+            > "${npm_directory}/bin/npm"
+          chmod 0700 "${npm_directory}/bin/npm"
+          printf '%s\n' "${npm_directory}/bin" >> "${GITHUB_PATH}"
       - name: Check the npm version
         shell: bash
         run: |
