@@ -8,11 +8,14 @@ below is an explicit first-package exception, not a runtime release path.
 ## Current versions and source ownership
 
 Core and Azure are published at `0.4.0`; D1 at `0.4.1`. DynamoDB `0.4.2` is
-published registration-only metadata, and `0.4.4` is the unpublished first trusted
+published registration-only metadata, and `0.4.5` is the unpublished first trusted
 runtime candidate. The `v0.4.3` release attempt failed its npm-version check
 before preparation: no runtime archive was produced or published. Its signed
-tag remains immutable; preserve the release as a failed attempt. Registration is
-not adapter code, conformance
+tag remains immutable; preserve the release as a failed attempt. The `v0.4.4`
+attempt completed preparation and smoke checks, then its direct preflight CLI
+failed with a top-level-await module-entry cycle (exit 13), before publication.
+Retain that signed tag, prepared artifacts and failed release as well.
+Registration is not adapter code, conformance
 evidence or a production dependency; runtime qualification remains pending.
 
 Unversioned Core/Azure/D1 changes in current source are **not** the code published
@@ -24,8 +27,14 @@ no Core or host upgrade is implied.
 
 Versions are independently assigned but release tags share a repository-wide
 namespace. Never reuse or move a tag/version, including failed publication or
-registration versions. First trusted DynamoDB is now planned as `v0.4.4`; the
-separate later D1 feature is planned as `0.4.5`, after rebase and its own review.
+registration versions. First trusted DynamoDB is now planned as `v0.4.5`; the
+separate later D1 feature is planned as `0.4.6`, after rebase and its own review.
+
+A release run uses the workflow at its tagged commit, as documented in
+[workflow triggers](https://docs.github.com/en/actions/concepts/workflows-and-actions/workflows#workflow-triggers)
+and the [`release` event reference](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#release).
+Changing `main` cannot repair that older tagged workflow; workflow code fixes
+require a fresh version and signed tag.
 
 ## Required configuration
 
@@ -58,10 +67,10 @@ v0.4.2 release is needed.
 
 Verify trusted publishing and package/account restrictions again for the fresh
 runtime candidate. After the corrected source passes full gates and merges,
-create and verify its signed annotated `v0.4.4` tag on `origin/main`; create its
+create and verify its signed annotated `v0.4.5` tag on `origin/main`; create its
 GitHub release only when this configuration is complete. Do not move or reuse
-the signed `v0.4.3` tag; retain its release as a failed attempt.
-Never manually publish the real `0.4.4` artifact
+the signed `v0.4.3` or `v0.4.4` tags; retain their releases as failed attempts.
+Never manually publish the real `0.4.5` artifact
 first: immutable bytes with missing trusted
 provenance cannot later be repaired by a skip. Registration `0.4.2` remains immutable
 and explicitly outside runtime qualification.
