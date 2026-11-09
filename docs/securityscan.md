@@ -91,7 +91,12 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
   larger batch than the caller wrote. Corrected 2026-07-29: D1 publishes no
   per-batch statement or SQL-size limit, as originally claimed here. The limit
   that actually binds is per Worker invocation — 1000 queries on Workers Paid,
-  50 on Free — and every statement inside a batch counts against it.
+  50 on Free. **Accounting correction 2026-11-09:** the July note incorrectly
+  counted each statement inside a batch against that budget. The current
+  [Cloudflare D1 limits](https://developers.cloudflare.com/d1/platform/limits/)
+  count one `db.batch()` call as one query against the invocation limit.
+  Individual statements retain their own SQL limits. The adapter's 100-action
+  transaction cap is a parity/robustness bound, not a platform batch limit.
 - **Exploitability:** Not attacker-reachable on its own; a host application
   would have to pass an oversized action list. The outcome is a thrown D1
   error, not corruption — D1 batches are atomic. It is a robustness/parity
@@ -103,9 +108,9 @@ the end. Severity scale: Critical / High / Medium / Low / Informational.
 - ✅ Resolved 2026-07-29 — the D1 adapter refuses more than 100 actions with a
   `StorageError` from the action count alone, before deriving keys, preparing
   statements, or touching the database, matching the Azure adapter's limit so
-  one action list is accepted or refused by both. The query-budget correction
-  noted in the evidence is recorded in the adapter comment and the package
-  README.
+  one action list is accepted or refused by both. The current query-budget
+  accounting is documented in the November correction above, the adapter
+  comment and the package README.
 
 ### 4. D1 transaction rejection inferred by substring match on error text
 
