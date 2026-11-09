@@ -49,6 +49,21 @@
       "workflowPath": ".github/workflows/publish.yml",
       "originalRunId": 30504107513,
       "originalRunAttempt": 1
+    },
+    {
+      "name": "@pegma/storage-dynamodb",
+      "version": "0.4.5",
+      "directory": "storage-dynamodb",
+      "tarballUrl": "https://registry.npmjs.org/@pegma/storage-dynamodb/-/storage-dynamodb-0.4.5.tgz",
+      "size": 14618,
+      "sha256": "5bb9cbc12540dc5c3a805181ebf8c2de28d75c0bf0d0180eb0712d4a97ec05be",
+      "integrity": "sha512-+uQK88D0QRYyKxti24zwW72zJj63abIi6Wzi0jK7FKQBC5b34r1K29BJ+x5Qe2VX3xn6nQVnPbZevBhBKIWnQg==",
+      "shasum": "b105595d10a38c0a8b7d0f6317031ef85e9073d0",
+      "sourceCommit": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "sourceTag": "v0.4.5",
+      "workflowPath": ".github/workflows/publish.yml",
+      "originalRunId": 42679292292,
+      "originalRunAttempt": 1
     }
   ]
 }

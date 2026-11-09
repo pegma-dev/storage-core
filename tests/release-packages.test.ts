@@ -97,7 +97,7 @@ describe("release package metadata", () => {
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
-      { name: "@pegma/storage-cloudflare-d1", version: "0.4.1" },
+      { name: "@pegma/storage-cloudflare-d1", version: "0.4.6" },
       { name: "@pegma/storage-dynamodb", version: "0.4.5" },
     ]);
     for (const adapter of manifests.slice(1)) {
@@ -577,7 +577,10 @@ function sourceArchive(metadata: Record<string, unknown>): Buffer {
   return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]));
 }
 
-async function preparedSchema2() {
+async function preparedSchema2(
+  selectedDirectory:
+    "storage-dynamodb" | "storage-cloudflare-d1" = "storage-dynamodb",
+) {
   const root = mkdtempSync(join(tmpdir(), "storage-schema2-"));
   const output = join(root, "prepared");
   mkdirSync(output);
@@ -593,8 +596,15 @@ async function preparedSchema2() {
   );
   const gitCommit = run(git, ["rev-parse", "HEAD"], root);
   const { policy, sha256: registryPolicySha256 } = await loadReusePolicy();
+  const selected = RELEASE_PACKAGES.find(
+    ({ directory }) => directory === selectedDirectory,
+  );
+  if (!selected) throw new Error("The selected fixture package was not found.");
+  const selectedName = selected.name;
   const packages: PreparedRecord[] = [];
   for (const entry of policy.packages) {
+    // A current reuse policy can also contain the source-selected package.
+    if (entry.name === selectedName) continue;
     const bytes = readFileSync(
       new URL(
         `./fixtures/release-registry/${entry.directory}-${entry.version}.tgz`,
@@ -621,26 +631,30 @@ async function preparedSchema2() {
   }
   const metadata = JSON.parse(
     readFileSync(
-      new URL("../packages/storage-dynamodb/package.json", import.meta.url),
+      new URL(
+        `../packages/${selected.directory}/package.json`,
+        import.meta.url,
+      ),
       "utf8",
     ),
   ) as Record<string, unknown>;
-  const sourceDirectory = join(root, "packages", "storage-dynamodb");
+  const sourceDirectory = join(root, "packages", selected.directory);
   mkdirSync(sourceDirectory, { recursive: true });
   writeFileSync(
     join(sourceDirectory, "package.json"),
     JSON.stringify(metadata),
   );
+  // Selected bytes are unsigned parser data, not a published SDK or crypto proof.
   const bytes = sourceArchive(metadata),
     inspected = inspectReleaseTarball(bytes);
   const version = inspected.package.version;
   const releaseTag = `v${version}`;
-  const tarball = `pegma-storage-dynamodb-${version}.tgz`;
+  const tarball = `${selectedName.slice(1).replace("/", "-")}-${version}.tgz`;
   writeFileSync(join(output, tarball), bytes);
   packages.push({
-    name: "@pegma/storage-dynamodb",
+    name: selectedName,
     version,
-    directory: "storage-dynamodb",
+    directory: selected.directory,
     tarball,
     size: bytes.length,
     shasum: createHash("sha1").update(bytes).digest("hex"),
@@ -654,8 +668,18 @@ async function preparedSchema2() {
       repository: "pegma-dev/storage-core",
       gitCommit,
       releaseTag,
-      directory: "storage-dynamodb",
+      directory: selected.directory,
     },
+  });
+  if (packages.length !== RELEASE_PACKAGES.length)
+    throw new Error(
+      "The fixture requires one source and three genuine originals.",
+    );
+  const orderedPackages = RELEASE_PACKAGES.map(({ name }) => {
+    const matching = packages.filter((record) => record.name === name);
+    if (matching.length !== 1)
+      throw new Error(`The fixture requires exactly one record for ${name}.`);
+    return matching[0]!;
   });
   const manifest: PreparedManifest = {
     schemaVersion: 2,
@@ -663,7 +687,7 @@ async function preparedSchema2() {
     gitCommit,
     releaseTag,
     registryPolicySha256,
-    packages,
+    packages: orderedPackages,
   };
   const manifestPath = join(output, "package-manifest.json");
   const save = () =>
@@ -840,6 +864,18 @@ describe("selected-source schema2 archives", () => {
         expectedManifestSha256,
       });
       expect(actual).toEqual(f.manifest);
+      expect(f.manifest.packages.map(({ name }) => name)).toEqual(
+        RELEASE_PACKAGES.map(({ name }) => name),
+      );
+      expect(f.manifest.registryPolicySha256).toBe(
+        createHash("sha256")
+          .update(
+            readFileSync(
+              new URL("../scripts/release-reuse-policy.json", import.meta.url),
+            ),
+          )
+          .digest("hex"),
+      );
       expect(f.manifest.packages.map(({ publish }) => publish)).toEqual([
         false,
         false,
@@ -849,6 +885,92 @@ describe("selected-source schema2 archives", () => {
       expect(f.manifest.packages[0]!.origin.sourceCommit).not.toBe(
         f.manifest.gitCommit,
       );
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies the unsigned D1 source candidate with genuine Core040 Azure040 and Dynamo045 originals", async () => {
+    const f = await preparedSchema2("storage-cloudflare-d1");
+    try {
+      const expectedManifestSha256 = createHash("sha256")
+        .update(readFileSync(f.manifestPath))
+        .digest("hex");
+      const actual = await verifyPreparedManifest(f.manifestPath, {
+        root: f.root,
+        expectedReleaseCommit: f.manifest.gitCommit,
+        expectedManifestSha256,
+      });
+      expect(actual).toEqual(f.manifest);
+      expect(
+        actual.packages.map(({ name, version, publish }) => ({
+          name,
+          version,
+          publish,
+        })),
+      ).toEqual([
+        { name: "@pegma/storage-core", version: "0.4.0", publish: false },
+        {
+          name: "@pegma/storage-azure-tables",
+          version: "0.4.0",
+          publish: false,
+        },
+        {
+          name: "@pegma/storage-cloudflare-d1",
+          version: "0.4.6",
+          publish: true,
+        },
+        { name: "@pegma/storage-dynamodb", version: "0.4.5", publish: false },
+      ]);
+      expect(actual.registryPolicySha256).toBe(
+        createHash("sha256")
+          .update(
+            readFileSync(
+              new URL("../scripts/release-reuse-policy.json", import.meta.url),
+            ),
+          )
+          .digest("hex"),
+      );
+      expect(actual.packages[2]!.origin.kind).toBe("source");
+      const original = actual.packages[3]!;
+      expect(original.origin.kind).toBe("registryReuse");
+      expect(readFileSync(join(f.output, original.tarball))).toEqual(
+        readFileSync(
+          new URL(
+            "./fixtures/release-registry/storage-dynamodb-0.4.5.tgz",
+            import.meta.url,
+          ),
+        ),
+      );
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects changed selected D1 exports and a Dynamo045 origin relabeled to the source candidate", async () => {
+    const f = await preparedSchema2("storage-cloudflare-d1");
+    try {
+      const selected = f.manifest.packages[2]!;
+      const originalMetadata = structuredClone(selected.package);
+      selected.package = {
+        ...originalMetadata,
+        exports: { ".": "./private.js" },
+      };
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/source/u);
+      selected.package = originalMetadata;
+
+      const original = f.manifest.packages[3]!;
+      original.origin = {
+        ...original.origin,
+        sourceTag: f.manifest.releaseTag,
+      };
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/registry reuse origin/u);
     } finally {
       rmSync(f.root, { recursive: true, force: true });
     }

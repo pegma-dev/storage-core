@@ -100,10 +100,13 @@ The `v0.4.3` attempt failed its npm-version check before preparation.
 The `v0.4.4` attempt completed preparation and smoke checks, then failed the
 preflight CLI entry with a module cycle (exit 13), before publication.
 Keep both signed tags immutable and retain their releases as failed attempts.
-`@pegma/storage-dynamodb@0.4.5` is the unpublished first trusted
-AWS runtime candidate (see `docs/AWS_ADAPTER.md` and `docs/RELEASING.md`).
-The later D1 feature is planned as `0.4.6`. Do not claim runtime release before
-its actual registry qualification. The port offers keyed access,
+`@pegma/storage-dynamodb@0.4.5` is now a
+[qualified trusted runtime](https://github.com/pegma-dev/storage-core/releases/tag/v0.4.5),
+retaining exact Core `0.4.0`. D1 `0.4.6` is the unpublished candidate for optional
+concurrent keyed-read batching; its default remains `readBatchSize: 1`.
+Its own review, release qualification and host Free-plan acceptance remain
+separate gates. See `docs/RELEASING.md` and the D1 package README.
+The port offers keyed access,
 optimistic concurrency through `update`, version-conditional
 `putIfUnchanged` and `deleteIfUnchanged`, partition reads, bounded
 authoritative cross-partition scans, and `transact`.
