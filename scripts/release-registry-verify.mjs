@@ -1445,16 +1445,27 @@ function cliOptions(args) {
 }
 async function main() {
   const [command, ...args] = process.argv.slice(2),
-    options = cliOptions(args);
+    options = cliOptions(args),
+    runId = Number(options.runId ?? process.env.GITHUB_RUN_ID),
+    runAttempt = Number(options.runAttempt ?? process.env.GITHUB_RUN_ATTEMPT);
   if (
     !["preflight", "verify"].includes(command) ||
     !options.manifest ||
+    typeof options.output !== "string" ||
+    options.output.length === 0 ||
+    !Number.isSafeInteger(runId) ||
+    runId < 1 ||
+    !Number.isSafeInteger(runAttempt) ||
+    runAttempt < 1 ||
     !/^[0-9a-f]{40}$/u.test(options.expectedReleaseCommit ?? "") ||
     !/^[0-9a-f]{64}$/u.test(options.expectedManifestSha256 ?? "")
   )
     fail(
       "usage: release-registry-verify.mjs preflight|verify --manifest --expected-release-commit --expected-manifest-sha256 --output --run-id --run-attempt",
     );
+  // Keep the resolved invocation identity stable across asynchronous work.
+  options.runId = runId;
+  options.runAttempt = runAttempt;
   const { verifyPreparedManifest } = await import("./release-packages.mjs");
   const manifest = await verifyPreparedManifest(options.manifest, options);
   if (command === "preflight") await preflightRegistry(manifest, options);
@@ -1473,6 +1484,6 @@ if (
     })
     .catch((error) => {
       process.exitCode = 1;
-      console.error(error instanceof Error ? error.message : String(error));
+      console.error(error);
     });
 }
