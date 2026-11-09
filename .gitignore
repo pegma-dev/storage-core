@@ -3,6 +3,8 @@ pnpm-debug.log*
 dist/
 coverage/
 .release/
+/.release-reuse-verification/
+/.release-consumer-verification/
 *.tsbuildinfo
 
 .env

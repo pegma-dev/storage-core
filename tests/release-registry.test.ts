@@ -1,5 +1,21 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { createHash, timingSafeEqual } from "node:crypto";
+import * as fsPromises from "node:fs/promises";
+import {
+  lstatSync,
+  constants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -10,8 +26,18 @@ import {
   inspectReleaseTarball,
   isolatedVerificationEnvironment,
   loadReusePolicy,
+  preflightRegistry,
   registryReuseOrigin,
   verifyProvenanceAudit,
+  verifyPublishingJobs,
+  verifyReusedPackages,
+  validateReusePolicy,
+  verifyRegistryRelease,
+} from "../scripts/release-registry-verify.mjs";
+import type {
+  PreparedManifest,
+  PreparedPackage,
+  VerificationSeams,
 } from "../scripts/release-registry-verify.mjs";
 
 const fixture = (name: string): Buffer =>
@@ -178,7 +204,131 @@ function changeClaim(bundle: BundleFixture, path: string[], value: unknown) {
   ).toString("base64");
 }
 
+async function historicalWriterFixture() {
+  const { policy } = await loadReusePolicy();
+  const bundleFiles = [
+    "core040-slsa.json",
+    "azure040-slsa.json",
+    "d1041-slsa.json",
+  ];
+  const records = policy.packages.map((entry) => ({
+    ...entry,
+    origin: registryReuseOrigin(entry),
+    publish: false,
+    tarball: `${entry.name.slice(1).replace("/", "-")}-${entry.version}.tgz`,
+    ...inspectReleaseTarball(
+      fixture(`${entry.directory}-${entry.version}.tgz`),
+    ),
+  }));
+  // A scripted trusted npm-output boundary, NOT a claim that this test ran
+  // ECDSA/Sigstore. Every nested signed bundle is the genuine public fixture.
+  const audit = {
+    invalid: [],
+    missing: [],
+    verified: records.map((record, index) => ({
+      name: record.name,
+      version: record.version,
+      location: `node_modules/${record.name}`,
+      registry: REGISTRY,
+      attestationBundles: [
+        JSON.parse(fixture(bundleFiles[index]!).toString("utf8")),
+      ],
+    })),
+  };
+  const facts = verifyProvenanceAudit(audit, records, identity, policy);
+  const responses = new Map<string, Record<string, unknown>>();
+  for (const runId of new Set(facts.map((fact) => fact.runId))) {
+    const group = facts.filter((fact) => fact.runId === runId);
+    const first = group[0]!;
+    const start = new Date(
+      Math.min(...group.map((fact) => Date.parse(fact.certificate.validFrom))) -
+        1000,
+    ).toISOString();
+    const end = new Date(
+      Math.max(...group.map((fact) => Date.parse(fact.certificate.validTo))) +
+        1000,
+    ).toISOString();
+    const runUrl = `https://api.github.com/repos/pegma-dev/storage-core/actions/runs/${runId}`;
+    responses.set(runUrl, {
+      id: runId,
+      head_sha: first.sourceCommit,
+      head_branch: first.sourceTag,
+      run_attempt: 1,
+      event: "release",
+      path: ".github/workflows/publish.yml",
+      repository: { id: 1312519623, owner: { id: 309286193 } },
+    });
+    responses.set(`${runUrl}/attempts/1/jobs?per_page=100`, {
+      total_count: 1,
+      jobs: [
+        {
+          id: runId === 30334062325 ? 90195221537 : 90750106220,
+          run_id: runId,
+          run_attempt: 1,
+          head_branch: first.sourceTag,
+          name: "publish",
+          status: "completed",
+          conclusion: "success",
+          head_sha: first.sourceCommit,
+          started_at: start,
+          completed_at: end,
+          steps: [
+            {
+              name: "Publish verified prepared tarballs",
+              status: "completed",
+              conclusion: "success",
+              started_at: start,
+              completed_at: end,
+            },
+          ],
+        },
+      ],
+    });
+  }
+  const fetch = vi.fn(async (url: string | URL | Request) => {
+    const response = responses.get(String(url));
+    return response
+      ? Response.json(response)
+      : new Response(null, { status: 404 });
+  });
+  return { records, audit, facts, responses, fetch };
+}
+
 describe("registry reuse source policy", () => {
+  it("accepts only a unique canonical inventory subset without inventing a future runtime pin", async () => {
+    const { policy } = await loadReusePolicy();
+    expect(validateReusePolicy({ ...policy, packages: [] }).packages).toEqual(
+      [],
+    );
+    expect(
+      validateReusePolicy({
+        ...policy,
+        packages: [policy.packages[0], policy.packages[2]],
+      }).packages,
+    ).toEqual([policy.packages[0], policy.packages[2]]);
+    expect(() =>
+      validateReusePolicy({
+        ...policy,
+        packages: [policy.packages[0], policy.packages[0]],
+      }),
+    ).toThrow();
+    expect(() =>
+      validateReusePolicy({
+        ...policy,
+        packages: [policy.packages[2], policy.packages[0]],
+      }),
+    ).toThrow();
+    expect(() =>
+      validateReusePolicy({
+        ...policy,
+        packages: [{ ...policy.packages[0], name: "@other/storage" }],
+      }),
+    ).toThrow();
+    expect(
+      policy.packages.some(({ name }) => name === "@pegma/storage-dynamodb"),
+    ).toBe(false);
+  });
+
   it("pins the original literal archives and their original publishing sources", async () => {
     const { policy, sha256 } = await loadReusePolicy();
     expect(sha256).toMatch(/^[a-f0-9]{64}$/u);
@@ -562,6 +712,68 @@ describe("trusted npm audit claim boundary", () => {
   });
 });
 
+describe("all authenticated historical writer observations", () => {
+  it("checks both actual historical runs and their exact legacy writer jobs for all three reused packages", async () => {
+    const f = await historicalWriterFixture();
+    const jobs = await verifyPublishingJobs(f.facts, { fetch: f.fetch });
+    expect(jobs.map(({ id }) => id).sort()).toEqual([90195221537, 90750106220]);
+    expect(
+      jobs.every(
+        ({ stepName }) => stepName === "Publish verified prepared tarballs",
+      ),
+    ).toBe(true);
+    expect(jobs.map(({ runId }) => runId).sort()).toEqual([
+      30334062325, 30504107513,
+    ]);
+    expect(jobs.flatMap(({ packages }) => packages).join(" ")).toContain(
+      "@pegma/storage-core",
+    );
+    expect(jobs.flatMap(({ packages }) => packages).join(" ")).toContain(
+      "@pegma/storage-azure-tables",
+    );
+    expect(jobs.flatMap(({ packages }) => packages).join(" ")).toContain(
+      "@pegma/storage-cloudflare-d1",
+    );
+    expect(f.fetch).toHaveBeenCalledTimes(4);
+    expect(f.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      ...f.responses.keys(),
+    ]);
+  });
+
+  it.each([
+    "run-source",
+    "known-job-id",
+    "legacy-step",
+    "step-window",
+    "incomplete-page",
+    "unavailable",
+  ] as const)(
+    "refuses a historical %s mismatch instead of accepting an empty job-proof set",
+    async (fault) => {
+      const f = await historicalWriterFixture();
+      const runUrl =
+        "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/30334062325";
+      const page = f.responses.get(`${runUrl}/attempts/1/jobs?per_page=100`)!;
+      const job = (page.jobs as Array<Record<string, unknown>>)[0]!;
+      const step = (job.steps as Array<Record<string, unknown>>)[0]!;
+      if (fault === "run-source")
+        f.responses.get(runUrl)!.head_sha = "0".repeat(40);
+      else if (fault === "known-job-id") job.id = 90195221538;
+      else if (fault === "legacy-step")
+        step.name = "Verify and publish the prepared release";
+      else if (fault === "step-window") {
+        step.started_at = "2020-01-01T00:00:00.000Z";
+        step.completed_at = "2020-01-01T00:01:00.000Z";
+      } else if (fault === "incomplete-page") page.total_count = 101;
+      else f.fetch.mockResolvedValueOnce(new Response(null, { status: 503 }));
+      await expect(
+        verifyPublishingJobs(f.facts, { fetch: f.fetch }),
+      ).rejects.toThrow();
+      expect(f.fetch).toHaveBeenCalled();
+    },
+  );
+});
+
 describe("publishing authority", () => {
   function environment(): NodeJS.ProcessEnv {
     return {
@@ -632,4 +844,897 @@ describe("publishing authority", () => {
     expect(publish.npm_config_registry).toBe(REGISTRY);
     expect(publish.npm_config_ignore_scripts).toBe("true");
   });
+});
+
+const npmToolUrl = "https://registry.npmjs.org/npm/-/npm-11.18.0.tgz";
+const npmToolSha256 =
+  "73f6155215ebabf4ed96dca1f567c2372cc713c33af2e5b9b62fde4e92373e2e";
+const maximumNpmToolBytes = 16 * 1024 * 1024;
+let npmToolPromise: Promise<Buffer> | undefined;
+
+/** Real official archive, never a fabricated hash/tree. A supplied bad cache
+ * is an error, not permission to fetch different bytes or skip the test. */
+function officialNpmTool(): Promise<Buffer> {
+  npmToolPromise ??= (async () => {
+    const cached = process.env.PEGMA_TEST_NPM_ARCHIVE_PATH;
+    let bytes: Buffer;
+    if (cached !== undefined) {
+      const metadata = lstatSync(cached);
+      if (
+        !metadata.isFile() ||
+        metadata.isSymbolicLink() ||
+        metadata.size > maximumNpmToolBytes
+      )
+        throw new Error(
+          "The test npm archive cache is not a bounded regular file.",
+        );
+      bytes = readFileSync(cached);
+    } else {
+      const response = await globalThis.fetch(npmToolUrl, {
+        redirect: "error",
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (response.status !== 200 || response.body === null)
+        throw new Error("The pinned official test npm archive is unavailable.");
+      const reader = response.body.getReader();
+      const chunks: Buffer[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const next = await reader.read();
+          if (next.done) break;
+          length += next.value.byteLength;
+          if (length > maximumNpmToolBytes) {
+            void reader.cancel().catch(() => {});
+            throw new Error(
+              "The official test npm archive exceeds its byte bound.",
+            );
+          }
+          chunks.push(Buffer.from(next.value));
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      bytes = Buffer.concat(chunks, length);
+    }
+    if (digest(bytes) !== npmToolSha256)
+      throw new Error(
+        "The test npm archive differs from the pinned official bytes.",
+      );
+    return bytes;
+  })();
+  return npmToolPromise;
+}
+
+async function withoutExplicitNpm<T>(action: () => Promise<T>): Promise<T> {
+  const previous = process.env.RELEASE_NPM_CLI;
+  delete process.env.RELEASE_NPM_CLI;
+  try {
+    return await action();
+  } finally {
+    if (previous === undefined) delete process.env.RELEASE_NPM_CLI;
+    else process.env.RELEASE_NPM_CLI = previous;
+  }
+}
+
+/** Delegate real extraction, but stop at the first selected npm --version
+ * command. No npm version, install, signature audit, or consumer is executed,
+ * and no successful crypto receipt is synthesized. */
+function observingToolPorts(
+  bytes: Buffer,
+  selected: (cli: string, cwd: string) => never,
+) {
+  const commands: Array<{
+    command: string;
+    args: readonly string[];
+    cwd: string;
+  }> = [];
+  const fetch = vi.fn(async (url: string | URL | Request) => {
+    expect(String(url)).toBe(npmToolUrl);
+    return new Response(new Uint8Array(bytes));
+  });
+  const run: NonNullable<VerificationSeams["run"]> = async (
+    command,
+    args,
+    options,
+  ) => {
+    commands.push({ command, args: [...args], cwd: options.cwd });
+    if (command === "tar") {
+      const stdout = execFileSync(command, [...args], {
+        cwd: options.cwd,
+        env: options.env,
+        encoding: "utf8",
+        timeout: 20_000,
+      });
+      return { status: 0, stdout, stderr: "" };
+    }
+    if (
+      command === process.execPath &&
+      args.length === 2 &&
+      args[1] === "--version"
+    ) {
+      const cli = args[0];
+      if (cli === undefined)
+        throw new Error("No selected npm CLI was supplied.");
+      return selected(cli, options.cwd);
+    }
+    throw new Error(
+      "Unexpected command after the test tool-selection boundary.",
+    );
+  };
+  return { fetch, run, commands };
+}
+
+describe("verified official npm tool selection", () => {
+  it("selects the verified owned archive CLI without bundled-tree discovery, before npm execution", async () => {
+    const bytes = await officialNpmTool();
+    const root = mkdtempSync(
+      join(realpathSync(tmpdir()), "storage-npm-selection-test-"),
+    );
+    const stop = new Error("Stop before executing the selected npm CLI.");
+    let observed = false;
+    const ports = observingToolPorts(bytes, (cli, cwd) => {
+      observed = true;
+      expect(relative(cwd, cli).replaceAll("\\", "/")).toBe(
+        "npm-tool/package/bin/npm-cli.js",
+      );
+      expect(realpathSync(cli)).toBe(cli);
+      expect(
+        JSON.parse(
+          readFileSync(join(dirname(dirname(cli)), "package.json"), "utf8"),
+        ).version,
+      ).toBe("11.18.0");
+      expect(readFileSync(cli).length).toBeGreaterThan(0);
+      expect(cwd).not.toBe(root);
+      throw stop;
+    });
+    try {
+      await withoutExplicitNpm(async () => {
+        await expect(
+          verifyReusedPackages(
+            [],
+            identity,
+            { output: join(root, "proof") },
+            ports,
+          ),
+        ).rejects.toBe(stop);
+      });
+      expect(observed).toBe(true);
+      expect(ports.commands.map(({ command }) => command)).toEqual([
+        "tar",
+        process.execPath,
+      ]);
+      const source = readFileSync(
+        new URL("../scripts/release-registry-verify.mjs", import.meta.url),
+        "utf8",
+      );
+      const start = source.indexOf("async function npmContext(");
+      const context = source.slice(
+        start,
+        source.indexOf("\nfunction derValue", start),
+      );
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(context).not.toContain("dirname(process.execPath)");
+      expect(context).not.toContain("const candidates");
+      expect(context).toMatch(
+        /if \(cli === undefined\)\s*\{\s*cli = join\(expected,\s*"package",\s*"bin",\s*"npm-cli.js"\)/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("refuses changed official tool bytes before extraction or npm execution", async () => {
+    const bytes = Buffer.from(await officialNpmTool());
+    bytes[0] = bytes[0]! ^ 1;
+    const root = mkdtempSync(
+      join(realpathSync(tmpdir()), "storage-npm-digest-test-"),
+    );
+    const ports = observingToolPorts(bytes, () => {
+      throw new Error("A changed tool must never execute.");
+    });
+    try {
+      await withoutExplicitNpm(async () => {
+        await expect(
+          verifyReusedPackages(
+            [],
+            identity,
+            { output: join(root, "proof") },
+            ports,
+          ),
+        ).rejects.toThrow("the reviewed npm tool archive differs");
+      });
+      expect(ports.fetch).toHaveBeenCalledTimes(1);
+      expect(ports.commands).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it.each([
+    { channel: "option", corruption: "link" },
+    { channel: "environment", corruption: "link" },
+    { channel: "option", corruption: "bytes" },
+    { channel: "environment", corruption: "bytes" },
+  ] as const)(
+    "refuses an explicit $channel CLI with unreviewed $corruption before npm execution",
+    async ({ channel, corruption }) => {
+      const bytes = await officialNpmTool();
+      const root = mkdtempSync(
+        join(realpathSync(tmpdir()), "storage-npm-explicit-test-"),
+      );
+      try {
+        const extracted = join(root, "explicit-tool");
+        mkdirSync(extracted);
+        const archive = join(root, "npm-official.tgz");
+        writeFileSync(archive, bytes);
+        execFileSync("tar", ["-xzf", archive, "-C", extracted], {
+          timeout: 20_000,
+        });
+        const packageRoot = join(extracted, "package");
+        const cli = join(packageRoot, "bin", "npm-cli.js");
+        if (corruption === "link") {
+          const target = join(root, "unreviewed-bin");
+          mkdirSync(target);
+          symlinkSync(target, join(packageRoot, "unreviewed-link"), "junction");
+        } else {
+          const metadata = join(packageRoot, "package.json");
+          writeFileSync(metadata, readFileSync(metadata, "utf8") + "\n");
+        }
+        const ports = observingToolPorts(bytes, () => {
+          throw new Error("A changed explicit tool must never execute.");
+        });
+        await withoutExplicitNpm(async () => {
+          if (channel === "environment") process.env.RELEASE_NPM_CLI = cli;
+          await expect(
+            verifyReusedPackages(
+              [],
+              identity,
+              {
+                output: join(root, "proof"),
+                ...(channel === "option" ? { npmCli: cli } : {}),
+              },
+              ports,
+            ),
+          ).rejects.toThrow(
+            corruption === "link"
+              ? "reviewed npm tree contains a link"
+              : "npm tool files differ from the pinned official release",
+          );
+        });
+        expect(ports.commands.map(({ command }) => command)).toEqual(["tar"]);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
+});
+
+/** Exercises real orchestration over temporary files/Git and genuine archive
+ * fixtures. npm build/pack/audit and backend execution are CONTROLLED TOOLS:
+ * these tests do not qualify crypto, runtime SDK behavior or publication. */
+async function pipelineFixture() {
+  const historical = await historicalWriterFixture();
+  const npmBytes = await officialNpmTool();
+  const root = mkdtempSync(
+    join(realpathSync(tmpdir()), "storage-pipeline-test-"),
+  );
+  for (const file of ["package.json", "pnpm-lock.yaml", ".gitignore"])
+    copyFileSync(new URL(`../${file}`, import.meta.url), join(root, file));
+  for (const directory of [
+    "storage-core",
+    "storage-azure-tables",
+    "storage-cloudflare-d1",
+    "storage-dynamodb",
+  ]) {
+    mkdirSync(join(root, "packages", directory), { recursive: true });
+    for (const file of ["package.json", "README.md", "LICENSE"])
+      copyFileSync(
+        new URL(`../packages/${directory}/${file}`, import.meta.url),
+        join(root, "packages", directory, file),
+      );
+  }
+  const git = process.platform === "win32" ? "git.exe" : "git";
+  const gitRun = (args: string[]) =>
+    execFileSync(git, args, { cwd: root, encoding: "utf8" }).trim();
+  gitRun(["init", "--quiet"]);
+  gitRun(["config", "user.name", "Release Pipeline Fixture"]);
+  gitRun(["config", "user.email", "release@example.invalid"]);
+  gitRun(["add", "."]);
+  gitRun(["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"]);
+  const records = new Map<string, PreparedPackage>(
+    historical.records.map((record) => [record.name, record]),
+  );
+  const tarballs = new Map<string, Buffer>(
+    historical.records.map((record) => [
+      record.name,
+      fixture(`${record.directory}-${record.version}.tgz`),
+    ]),
+  );
+  const calls: Array<{ command: string; args: readonly string[] }> = [];
+  const state = {
+    auditFails: false,
+    consumerFails: false,
+    lockTamper: false,
+    selected: "absent" as "absent" | "present" | "unknown",
+    acceptedPublish: false,
+    publishThrows: false,
+  };
+  const output = (stdout = "", status = 0) => ({
+    pid: 0,
+    status,
+    signal: null,
+    error: undefined,
+    stdout,
+    stderr: status ? "controlled test tool failure" : "",
+    output: [null, stdout, ""],
+  });
+  function command(
+    command: string,
+    args: readonly string[],
+    options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  ) {
+    calls.push({ command, args: [...args] });
+    const cwd = options.cwd ?? root;
+    if (command === "tar" || command === git || command === "git")
+      return output(
+        execFileSync(command, [...args], {
+          cwd,
+          env: options.env,
+          encoding: "utf8",
+          timeout: 20_000,
+        }),
+      );
+    if (command === "npm" || command === "npm.cmd") {
+      if (args[0] === "run" && args[1] === "build") return output();
+      if (args[0] === "pack") {
+        const directory = args[1]!;
+        const metadata = JSON.parse(
+          readFileSync(join(directory, "package.json"), "utf8"),
+        );
+        const bytes = archive([], metadata);
+        const inspected = inspectReleaseTarball(bytes);
+        const tarball = `${metadata.name.slice(1).replace("/", "-")}-${metadata.version}.tgz`;
+        const destination = args[args.indexOf("--pack-destination") + 1]!;
+        writeFileSync(join(destination, tarball), bytes);
+        const record: PreparedPackage = {
+          name: metadata.name,
+          version: metadata.version,
+          directory: basename(directory),
+          tarball,
+          size: bytes.length,
+          sha256: digest(bytes),
+          shasum: digest(bytes, "sha1"),
+          integrity: `sha512-${digest(bytes, "sha512", "base64")}`,
+          publish: true,
+          package: inspected.package,
+          files: inspected.files,
+          origin: {
+            kind: "source",
+            repository: "pegma-dev/storage-core",
+            gitCommit: gitRun(["rev-parse", "HEAD"]),
+            releaseTag: "v0.4.3",
+            directory: basename(directory),
+          },
+        };
+        records.set(record.name, record);
+        tarballs.set(record.name, bytes);
+        return output(
+          JSON.stringify([
+            {
+              name: record.name,
+              version: record.version,
+              filename: tarball,
+              integrity: record.integrity,
+              shasum: record.shasum,
+            },
+          ]),
+        );
+      }
+      if (args[0] === "--version") return output("11.18.0\n");
+      if (args[0] === "publish") {
+        state.acceptedPublish = true;
+        state.selected = "present";
+        return output(
+          "CONTROLLED_PUBLISH_TOOL_ONLY",
+          state.publishThrows ? 1 : 0,
+        );
+      }
+    }
+    if (command === process.execPath && args[0]?.endsWith("npm-cli.js")) {
+      if (args[1] === "--version") return output("11.18.0\n");
+      if (args[1] === "install") {
+        const input = JSON.parse(
+          readFileSync(join(cwd, "package.json"), "utf8"),
+        );
+        const packages: Record<string, unknown> = {};
+        for (const record of records.values()) {
+          if (!Object.hasOwn(input.dependencies, record.name)) continue;
+          const requested = input.dependencies[record.name] as string;
+          packages[`node_modules/${record.name}`] = {
+            version: record.version,
+            resolved: requested.startsWith("file:")
+              ? requested
+              : canonicalTarball(record),
+            integrity:
+              state.lockTamper && record.name === "@pegma/storage-core"
+                ? "sha512-invalid"
+                : record.integrity,
+          };
+        }
+        writeFileSync(
+          join(cwd, "package-lock.json"),
+          JSON.stringify({ packages }),
+        );
+        return output("CONTROLLED_INSTALL_TOOL_ONLY");
+      }
+      if (args[1] === "audit")
+        return output(
+          JSON.stringify(historical.audit),
+          state.auditFails ? 1 : 0,
+        );
+    }
+    if (
+      command === process.execPath &&
+      args.includes("--experimental-strip-types")
+    ) {
+      const source = readFileSync(join(cwd, "consumer.mjs"), "utf8");
+      expect(source).toContain('from "@pegma/storage-core/conformance"');
+      expect(source).toContain('from "@pegma/storage-dynamodb"');
+      expect(source).toContain("e instanceof StorageError");
+      expect(source).toContain("e instanceof ConcurrencyError");
+      return output(
+        JSON.stringify({ status: "TEST_STUB_UNEXECUTED_PUBLIC_CONSUMER" }),
+        state.consumerFails ? 1 : 0,
+      );
+    }
+    throw new Error(
+      `Unexpected controlled command: ${command} ${args[0] ?? ""}`,
+    );
+  }
+  const fetch: typeof globalThis.fetch = async (url) => {
+    const address = String(url);
+    if (address === npmToolUrl) return new Response(new Uint8Array(npmBytes));
+    if (historical.responses.has(address))
+      return Response.json(historical.responses.get(address));
+    for (const record of records.values()) {
+      if (
+        address ===
+        `${REGISTRY}${encodeURIComponent(record.name)}/${record.version}`
+      ) {
+        if (record.publish && state.selected !== "present")
+          return new Response(null, {
+            status: state.selected === "unknown" ? 503 : 404,
+          });
+        return Response.json({
+          name: record.name,
+          version: record.version,
+          dist: {
+            integrity: record.integrity,
+            shasum: record.shasum,
+            tarball: canonicalTarball(record),
+            signatures: [
+              {
+                keyid: "CONTROLLED_METADATA_NOT_SIGNATURE_VERIFICATION",
+                sig: "unit-fixture",
+              },
+            ],
+          },
+        });
+      }
+      if (address === canonicalTarball(record))
+        return new Response(new Uint8Array(tarballs.get(record.name)!));
+    }
+    throw new Error("Unexpected controlled fetch URL.");
+  };
+  const seams: VerificationSeams = {
+    fetch,
+    run: async (cmd, args, options) => {
+      const result = command(cmd, args, options);
+      return {
+        status: result.status,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    },
+  };
+  return {
+    root,
+    records,
+    tarballs,
+    historical,
+    state,
+    calls,
+    command,
+    seams,
+    gitRun,
+  };
+}
+
+async function controlledPrepare(
+  f: Awaited<ReturnType<typeof pipelineFixture>>,
+  output?: string,
+) {
+  vi.resetModules();
+  vi.doMock("node:child_process", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("node:child_process")>()),
+    spawnSync: f.command,
+  }));
+  vi.stubGlobal("fetch", f.seams.fetch);
+  try {
+    const { prepareRelease } = await import("../scripts/release-packages.mjs");
+    return await withoutExplicitNpm(() =>
+      prepareRelease({
+        root: f.root,
+        requireClean: true,
+        releaseTag: "v0.4.3",
+        ...(output === undefined ? {} : { output }),
+      }),
+    );
+  } finally {
+    vi.unstubAllGlobals();
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  }
+}
+
+async function actualInlinePublisher(
+  f: Awaited<ReturnType<typeof pipelineFixture>>,
+  manifestPath: string,
+  manifest: PreparedManifest,
+  preflightDirectory: string,
+) {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/publish.yml", import.meta.url),
+    "utf8",
+  );
+  const match = /<<'NODE'\r?\n([^]*?)\r?\n          NODE/u.exec(workflow);
+  if (!match) throw new Error("The actual minimal publisher was not found.");
+  const original = match[1]!
+    .split(/\r?\n/u)
+    .map((line) => line.replace(/^ {10}/u, ""))
+    .join("\n");
+  const body = original.replace(
+    /^import\s+\{[^]*?\}\s+from\s+"node:[^"]+";\n/gmu,
+    "",
+  );
+  expect(body).not.toMatch(/^import /mu);
+  const policy = readFileSync(
+    new URL("../scripts/release-reuse-policy.json", import.meta.url),
+  );
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    SYSTEMROOT: process.env.SystemRoot,
+    RUNNER_TEMP: f.root,
+    GITHUB_ACTIONS: "true",
+    GITHUB_EVENT_NAME: "release",
+    GITHUB_SERVER_URL: "https://github.com",
+    GITHUB_REPOSITORY: "pegma-dev/storage-core",
+    GITHUB_REPOSITORY_ID: "1312519623",
+    GITHUB_REPOSITORY_OWNER_ID: "309286193",
+    GITHUB_SHA: manifest.gitCommit,
+    GITHUB_WORKFLOW_SHA: manifest.gitCommit,
+    GITHUB_REF: "refs/tags/" + manifest.releaseTag,
+    GITHUB_WORKFLOW_REF:
+      "pegma-dev/storage-core/.github/workflows/publish.yml@refs/tags/" +
+      manifest.releaseTag,
+    GITHUB_RUN_ID: "12345",
+    GITHUB_RUN_ATTEMPT: "2",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    ACTIONS_ID_TOKEN_REQUEST_URL:
+      "https://unit-fixture.actions.githubusercontent.com/oidc",
+    ACTIONS_ID_TOKEN_REQUEST_TOKEN: "UNIT_STUB_NOT_AN_OIDC_CREDENTIAL",
+    RELEASE_TAG: manifest.releaseTag!,
+    RELEASE_COMMIT: manifest.gitCommit,
+    RELEASE_DIRECTORY: dirname(manifestPath),
+    PREFLIGHT_DIRECTORY: preflightDirectory,
+    EXPECTED_MANIFEST_DIGEST: digest(readFileSync(manifestPath)),
+    EXPECTED_POLICY_DIGEST: digest(policy),
+    REGISTRY_POLICY_BASE64: policy.toString("base64"),
+    EXPECTED_PREFLIGHT_DIGEST: digest(
+      readFileSync(join(preflightDirectory, "preflight.json")),
+    ),
+  };
+  const messages: string[] = [];
+  const bindings = {
+    spawnSync: f.command,
+    createHash,
+    timingSafeEqual,
+    constants,
+    chmod: fsPromises.chmod,
+    copyFile: fsPromises.copyFile,
+    lstat: fsPromises.lstat,
+    mkdtemp: fsPromises.mkdtemp,
+    open: fsPromises.open,
+    readFile: fsPromises.readFile,
+    readdir: fsPromises.readdir,
+    realpath: fsPromises.realpath,
+    rm: fsPromises.rm,
+    writeFile: fsPromises.writeFile,
+    basename,
+    dirname,
+    join,
+    resolve,
+    tmpdir,
+    fetch: f.seams.fetch,
+    process: {
+      env,
+      stdout: {
+        write: (text: string) => {
+          messages.push(text);
+        },
+      },
+    },
+    setTimeout: (callback: () => void) => {
+      callback();
+      return 0;
+    },
+  };
+  // Execute the actual workflow source with only its external command/network
+  // ports controlled. The fake OIDC string never leaves this in-process test.
+  const execute = new Function(
+    "bindings",
+    `return (async()=>{const {${Object.keys(bindings).join(",")}}=bindings;\n${body}\n})();`,
+  ) as (ports: typeof bindings) => Promise<void>;
+  await execute(bindings);
+  return messages;
+}
+
+describe("controlled real release orchestration (not release qualification)", () => {
+  it("preserves prior evidence on retry and accepts a separately fresh output namespace", async () => {
+    const f = await pipelineFixture();
+    const fresh = f.root + "-fresh-output";
+    try {
+      const first = await controlledPrepare(f);
+      const before = digest(readFileSync(first.manifestPath));
+      const calls = f.calls.length;
+      await expect(controlledPrepare(f)).rejects.toThrow(
+        /preserve existing evidence and choose a fresh --output/u,
+      );
+      expect(f.calls).toHaveLength(calls);
+      const second = await controlledPrepare(f, fresh);
+      expect(dirname(second.manifestPath)).toBe(fresh);
+      expect(digest(readFileSync(first.manifestPath))).toBe(before);
+      expect(f.gitRun(["status", "--porcelain"])).toBe("");
+    } finally {
+      for (const path of [
+        fresh,
+        fresh + "-reuse-verification",
+        fresh + "-consumer-verification",
+        f.root,
+      ])
+        rmSync(path, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("prepares selected source only, preserves exact originals, checks all historical writers and runs the public consumer command", async () => {
+    const f = await pipelineFixture();
+    try {
+      const prepared = await controlledPrepare(f);
+      expect(
+        f.calls
+          .filter(({ args }) => args[0] === "pack")
+          .map(({ args }) => basename(args[1]!)),
+      ).toEqual(["storage-dynamodb"]);
+      expect(prepared.manifest.packages.map(({ publish }) => publish)).toEqual([
+        false,
+        false,
+        false,
+        true,
+      ]);
+      for (const record of prepared.manifest.packages.filter(
+        ({ publish }) => !publish,
+      ))
+        expect(
+          digest(
+            readFileSync(join(dirname(prepared.manifestPath), record.tarball)),
+          ),
+        ).toBe(record.sha256);
+      const jobs = JSON.parse(
+        readFileSync(
+          join(f.root, ".release-reuse-verification", "publishing-jobs.json"),
+          "utf8",
+        ),
+      );
+      expect(jobs).toHaveLength(2);
+      expect(
+        readFileSync(
+          join(
+            f.root,
+            ".release-consumer-verification",
+            "public-consumer.stdout",
+          ),
+          "utf8",
+        ),
+      ).toContain("TEST_STUB_UNEXECUTED_PUBLIC_CONSUMER");
+      expect(f.gitRun(["status", "--porcelain"])).toBe("");
+      const options = {
+        root: f.root,
+        manifest: prepared.manifestPath,
+        expectedReleaseCommit: prepared.manifest.gitCommit,
+        expectedManifestSha256: digest(readFileSync(prepared.manifestPath)),
+        output: join(f.root, "preflight-proof"),
+        runId: 12345,
+        runAttempt: 2,
+      };
+      const preflight = await withoutExplicitNpm(() =>
+        preflightRegistry(prepared.manifest, options, f.seams),
+      );
+      expect(preflight.decisions).toEqual(
+        prepared.manifest.packages.map(({ name, version, publish }) => ({
+          name,
+          version,
+          action: publish ? "publish" : "skip",
+        })),
+      );
+      const callsBefore = f.calls.length;
+      await withoutExplicitNpm(async () => {
+        await expect(
+          verifyRegistryRelease(
+            prepared.manifest,
+            { ...options, output: join(f.root, "postflight-proof") },
+            f.seams,
+          ),
+        ).rejects.toThrow("complete release is not visible");
+      });
+      expect(
+        f.calls
+          .slice(callsBefore)
+          .some(({ args }) => args.includes("--experimental-strip-types")),
+      ).toBe(false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("refuses unknown occupancy, audit failure and byte-identical but unqualified selected source during real preflight", async () => {
+    const f = await pipelineFixture();
+    try {
+      const prepared = await controlledPrepare(f);
+      const base = {
+        root: f.root,
+        manifest: prepared.manifestPath,
+        expectedReleaseCommit: prepared.manifest.gitCommit,
+        expectedManifestSha256: digest(readFileSync(prepared.manifestPath)),
+        runId: 12345,
+        runAttempt: 2,
+      };
+      for (const fault of [
+        "unknown",
+        "audit",
+        "unqualified-existing",
+      ] as const) {
+        f.state.selected =
+          fault === "unknown"
+            ? "unknown"
+            : fault === "unqualified-existing"
+              ? "present"
+              : "absent";
+        f.state.auditFails = fault === "audit";
+        const output = join(f.root, "preflight-" + fault);
+        await withoutExplicitNpm(async () => {
+          await expect(
+            preflightRegistry(prepared.manifest, { ...base, output }, f.seams),
+          ).rejects.toThrow();
+        });
+        expect(existsSync(join(output, "preflight.json"))).toBe(false);
+        expect(f.calls.some(({ args }) => args[0] === "publish")).toBe(false);
+      }
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it("executes actual inline skip, publish, changed-occupancy and accepted-unknown decisions without real registry writes", async () => {
+    const f = await pipelineFixture();
+    try {
+      const prepared = await controlledPrepare(f);
+      const output = join(f.root, "publisher-preflight");
+      await withoutExplicitNpm(() =>
+        preflightRegistry(
+          prepared.manifest,
+          {
+            root: f.root,
+            manifest: prepared.manifestPath,
+            expectedReleaseCommit: prepared.manifest.gitCommit,
+            expectedManifestSha256: digest(readFileSync(prepared.manifestPath)),
+            runId: 12345,
+            runAttempt: 2,
+            output,
+          },
+          f.seams,
+        ),
+      );
+      const publishCount = () =>
+        f.calls.filter(({ args }) => args[0] === "publish").length;
+      // Independent scripted registry scenarios share immutable artifacts;
+      // no live registry, signature verification, token or upload is involved.
+      f.state.selected = "unknown";
+      await expect(
+        actualInlinePublisher(
+          f,
+          prepared.manifestPath,
+          prepared.manifest,
+          output,
+        ),
+      ).rejects.toThrow("registry availability is unknown");
+      expect(publishCount()).toBe(0);
+      f.state.selected = "present";
+      await expect(
+        actualInlinePublisher(
+          f,
+          prepared.manifestPath,
+          prepared.manifest,
+          output,
+        ),
+      ).rejects.toThrow(/occupancy changed/u);
+      expect(publishCount()).toBe(0);
+      f.state.selected = "absent";
+      const messages = await actualInlinePublisher(
+        f,
+        prepared.manifestPath,
+        prepared.manifest,
+        output,
+      );
+      expect(
+        messages.filter((message) => message.includes("skipping.")).length,
+      ).toBe(3);
+      expect(publishCount()).toBe(1);
+      expect(f.calls.find(({ args }) => args[0] === "publish")!.args).toContain(
+        "--provenance",
+      );
+      f.state.selected = "absent";
+      f.state.publishThrows = true;
+      await expect(
+        actualInlinePublisher(
+          f,
+          prepared.manifestPath,
+          prepared.manifest,
+          output,
+        ),
+      ).rejects.toThrow("reviewed npm operation failed");
+      expect(f.state.acceptedPublish).toBe(true);
+      expect(publishCount()).toBe(2);
+      await expect(
+        actualInlinePublisher(
+          f,
+          prepared.manifestPath,
+          prepared.manifest,
+          output,
+        ),
+      ).rejects.toThrow(/occupancy changed/u);
+      expect(publishCount()).toBe(2);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }, 180_000);
+
+  it.each(["audit", "consumer", "dependency-lock"] as const)(
+    "withholds successful producer proof after controlled %s failure",
+    async (fault) => {
+      const f = await pipelineFixture();
+      f.state.auditFails = fault === "audit";
+      f.state.consumerFails = fault === "consumer";
+      f.state.lockTamper = fault === "dependency-lock";
+      try {
+        await expect(controlledPrepare(f)).rejects.toThrow();
+        expect(f.calls.some(({ args }) => args[0] === "publish")).toBe(false);
+        expect(
+          existsSync(
+            join(f.root, ".release-consumer-verification", "verification.json"),
+          ),
+        ).toBe(false);
+        if (fault !== "consumer")
+          expect(
+            f.calls.some(({ args }) =>
+              args.includes("--experimental-strip-types"),
+            ),
+          ).toBe(false);
+      } finally {
+        rmSync(f.root, { recursive: true, force: true });
+      }
+    },
+    180_000,
+  );
 });

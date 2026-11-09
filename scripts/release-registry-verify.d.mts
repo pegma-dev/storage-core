@@ -81,6 +81,8 @@ export interface VerificationOptions extends ValidationOptions {
   readonly expectedManifestSha256?: string;
   readonly runId?: string | number;
   readonly runAttempt?: string | number;
+  /** Explicit CLI must exactly match the verified archive tree. Omission (and
+   * no RELEASE_NPM_CLI) runs the pinned official tool from owned temporary files. */
   readonly npmCli?: string;
 }
 export interface VerificationSeams {
@@ -109,9 +111,27 @@ export interface AuthenticatedPackage {
     readonly validTo: string;
   };
 }
+export interface PublishingJob {
+  readonly id: number;
+  readonly runId: number;
+  readonly attempt: number;
+  readonly sourceCommit: string;
+  readonly sourceTag: string;
+  readonly packages: readonly string[];
+  readonly stepName:
+    | "Publish verified prepared tarballs"
+    | "Verify and publish the prepared release";
+  readonly conclusion: "success" | "failure";
+  readonly startedAt: string;
+  readonly completedAt: string;
+  readonly stepStartedAt: string;
+  readonly stepCompletedAt: string;
+}
 export const REGISTRY: "https://registry.npmjs.org/";
 export const RELEASE_REPOSITORY: "pegma-dev/storage-core";
 export const RELEASE_NPM_VERSION: "11.18.0";
+/** Validates a unique canonical inventory subset; does not authenticate pins. */
+export function validateReusePolicy(policy: unknown): ReusePolicy;
 export function loadReusePolicy(): Promise<{
   readonly policy: ReusePolicy;
   readonly sha256: string;
@@ -151,6 +171,12 @@ export function verifyProvenanceAudit(
   identity: PublicationIdentity,
   policy: ReusePolicy,
 ): readonly AuthenticatedPackage[];
+/** Facts must already come from npm's genuine verified SLSA audit. */
+export function verifyPublishingJobs(
+  facts: readonly AuthenticatedPackage[],
+  seams?: Pick<VerificationSeams, "fetch">,
+  output?: string,
+): Promise<readonly PublishingJob[]>;
 export function verifyReusedPackages(
   records: readonly PreparedPackage[],
   identity: ReleaseIdentity,

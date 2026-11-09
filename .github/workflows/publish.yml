@@ -425,7 +425,25 @@ jobs:
           exact(policy,["schemaVersion","repository","repositoryId","ownerId","builder","packages"]);
           if(policy.schemaVersion!==1||policy.repository!==repository||policy.repositoryId!=="1312519623"||
             policy.ownerId!=="309286193"||policy.builder!=="https://github.com/actions/runner/github-hosted"||
-            !Array.isArray(policy.packages)||policy.packages.length!==3)fail("registry policy identity differs");
+            !Array.isArray(policy.packages)||policy.packages.length>definitions.length)fail("registry policy identity differs");
+          let previousPolicyIndex=-1;
+          for(const entry of policy.packages){
+            exact(entry,["name","version","directory","tarballUrl","size","sha256","integrity","shasum",
+              "sourceCommit","sourceTag","workflowPath","originalRunId","originalRunAttempt"]);
+            const index=definitions.findIndex(([name])=>name===entry.name);
+            if(index<=previousPolicyIndex||entry.directory!==definitions[index]?.[1]||
+              !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(entry.version)||
+              entry.tarballUrl!==registry+entry.name+"/-/"+entry.directory+"-"+entry.version+".tgz"||
+              !/^[a-f0-9]{64}$/u.test(entry.sha256)||!/^[a-f0-9]{40}$/u.test(entry.shasum)||
+              !/^sha512-[A-Za-z0-9+/]{86}==$/u.test(entry.integrity)||
+              !/^[a-f0-9]{40}$/u.test(entry.sourceCommit)||entry.sourceTag!=="v"+entry.version||
+              entry.workflowPath!==workflow)fail("registry policy entry differs");
+            integer(entry.size);integer(entry.originalRunId);integer(entry.originalRunAttempt);
+            if(entry.size>4*1024*1024)fail("registry policy archive is too large");
+            previousPolicyIndex=index;
+          }
+          if(manifest.packages.some(record=>!record?.publish&&!policy.packages.some(entry=>
+            entry.name===record?.name&&entry.version===record?.version)))fail("unselected package policy is missing");
           const expectedFiles=["package-manifest.json",...manifest.packages.map(record=>record.tarball)].sort();
           const entries=await readdir(releaseDirectory,{withFileTypes:true});
           if(!same(entries.map(entry=>entry.name).sort(),expectedFiles)||entries.some(entry=>!entry.isFile()||entry.name.startsWith(".")))fail("original five-file inventory differs");

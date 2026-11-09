@@ -54,11 +54,7 @@ function integer(value, maximum = Number.MAX_SAFE_INTEGER, minimum = 1) {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum)
     fail("release data contains an invalid bound");
 }
-export async function loadReusePolicy() {
-  const bytes = await readFile(
-    new URL("./release-reuse-policy.json", import.meta.url),
-  );
-  const policy = JSON.parse(bytes);
+export function validateReusePolicy(policy) {
   exact(policy, [
     "schemaVersion",
     "repository",
@@ -74,15 +70,17 @@ export async function loadReusePolicy() {
     policy.ownerId !== "309286193" ||
     policy.builder !== "https://github.com/actions/runner/github-hosted" ||
     !Array.isArray(policy.packages) ||
-    policy.packages.length !== 3
+    policy.packages.length > 4
   )
     fail("registry reuse policy is invalid");
   const names = [
     "@pegma/storage-core",
     "@pegma/storage-azure-tables",
     "@pegma/storage-cloudflare-d1",
+    "@pegma/storage-dynamodb",
   ];
-  for (const [index, record] of policy.packages.entries()) {
+  let previousIndex = -1;
+  for (const record of policy.packages) {
     exact(record, [
       "name",
       "version",
@@ -98,9 +96,10 @@ export async function loadReusePolicy() {
       "originalRunId",
       "originalRunAttempt",
     ]);
+    const index = names.indexOf(record.name);
     if (
-      record.name !== names[index] ||
-      !/^\d+\.\d+\.\d+$/u.test(record.version) ||
+      index <= previousIndex ||
+      !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(record.version) ||
       record.directory !== record.name.split("/")[1] ||
       record.tarballUrl !== canonicalTarball(record) ||
       !/^[a-f0-9]{64}$/u.test(record.sha256) ||
@@ -114,7 +113,15 @@ export async function loadReusePolicy() {
     integer(record.size, maximumTarBytes);
     integer(record.originalRunId);
     integer(record.originalRunAttempt);
+    previousIndex = index;
   }
+  return policy;
+}
+export async function loadReusePolicy() {
+  const bytes = await readFile(
+    new URL("./release-reuse-policy.json", import.meta.url),
+  );
+  const policy = validateReusePolicy(JSON.parse(bytes));
   return { policy, sha256: hash(bytes) };
 }
 export function registryReuseOrigin(entry) {
@@ -479,42 +486,14 @@ async function treeFiles(directory) {
 }
 async function npmContext(directory, options, seams) {
   let cli = options.npmCli ?? process.env.RELEASE_NPM_CLI;
-  if (cli === undefined) {
-    const candidates = [
-      join(
-        dirname(process.execPath),
-        "node_modules",
-        "npm",
-        "bin",
-        "npm-cli.js",
-      ),
-      join(
-        dirname(process.execPath),
-        "..",
-        "lib",
-        "node_modules",
-        "npm",
-        "bin",
-        "npm-cli.js",
-      ),
-    ];
-    for (const candidate of candidates) {
-      try {
-        if ((await lstat(candidate)).isFile()) {
-          cli = await realpath(candidate);
-          break;
-        }
-      } catch {
-        /* Try the other bundled location. */
-      }
-    }
-  }
   if (
-    typeof cli !== "string" ||
-    !isAbsolute(cli) ||
-    basename(cli) !== "npm-cli.js" ||
-    (await realpath(cli)) !== resolve(cli) ||
-    (await lstat(cli)).isSymbolicLink()
+    cli !== undefined &&
+    (typeof cli !== "string" ||
+      !isAbsolute(cli) ||
+      basename(cli) !== "npm-cli.js" ||
+      (await realpath(cli)) !== resolve(cli) ||
+      !(await lstat(cli)).isFile() ||
+      (await lstat(cli)).isSymbolicLink())
   )
     fail("an absolute reviewed npm CLI is required");
   const toolResponse = await request(npmArchiveUrl, seams.fetch);
@@ -523,8 +502,9 @@ async function npmContext(directory, options, seams) {
   const toolBytes = await responseBytes(toolResponse, 16 * 1024 * 1024);
   if (!equal(hash(toolBytes), npmArchiveSha256))
     fail("the reviewed npm tool archive differs");
-  // This exact official archive is pinned before tar sees it. Bound expansion,
-  // compare every installed tool file, and execute no extracted package code.
+  // Authenticate the exact official archive before extraction or execution.
+  // The default runs this owned tool, never a host-bundled npm tree whose
+  // legitimate extra .bin links are not part of the published archive.
   gunzipSync(toolBytes, { maxOutputLength: 40 * 1024 * 1024 });
   const archive = join(directory, "npm-tool.tgz"),
     expected = join(directory, "npm-tool");
@@ -537,16 +517,26 @@ async function npmContext(directory, options, seams) {
   });
   if (extracted?.status !== 0) fail("reviewed npm archive extraction failed");
   const expectedTree = await treeFiles(join(expected, "package"));
-  const actualTree = await treeFiles(dirname(dirname(cli)));
   if (
-    expectedTree.size !== actualTree.size ||
-    [...expectedTree].some(
-      ([name, bytes]) => !actualTree.get(name)?.equals(bytes),
-    ) ||
+    !expectedTree.has("bin/npm-cli.js") ||
     JSON.parse(expectedTree.get("package.json").toString("utf8")).version !==
       RELEASE_NPM_VERSION
   )
     fail("npm tool files differ from the pinned official release");
+  if (cli === undefined) {
+    cli = join(expected, "package", "bin", "npm-cli.js");
+  } else {
+    // An explicitly reviewed CLI remains an exact-tree contract. Do not
+    // permit links, extra installed files, or another npm implementation.
+    const actualTree = await treeFiles(dirname(dirname(cli)));
+    if (
+      expectedTree.size !== actualTree.size ||
+      [...expectedTree].some(
+        ([name, bytes]) => !actualTree.get(name)?.equals(bytes),
+      )
+    )
+      fail("npm tool files differ from the pinned official release");
+  }
   await writeFile(join(directory, "user.npmrc"), "", {
     flag: "wx",
     mode: 0o600,
@@ -792,38 +782,85 @@ async function githubJson(path, seams, output, filename) {
   if (output) await writeFile(join(output, filename), bytes, { flag: "wx" });
   return JSON.parse(bytes.toString("utf8"));
 }
-async function verifyPublishingJobs(facts, identity, seams, output) {
-  const sourceFacts = facts.filter(
-    (fact) =>
-      fact.sourceTag === identity.releaseTag &&
-      fact.sourceCommit === identity.gitCommit,
-  );
-  if (!sourceFacts.length) return [];
-  const run = await githubJson(
-    "actions/runs/" + identity.runId,
-    seams,
-    output,
-    "github-original-run.json",
-  );
-  if (
-    run.head_sha !== identity.gitCommit ||
-    run.event !== "release" ||
-    run.path !== workflowPath ||
-    String(run.repository?.id) !== "1312519623" ||
-    String(run.repository?.owner?.id) !== "309286193"
-  )
-    fail("original publishing run does not match the approved source");
+// These reviewed historical publishers predate the minimal schema 2 job.
+// Future reuse entries still need genuine provenance and an actual modern
+// publisher; adding another legacy workflow requires a reviewed binding here.
+const historicalPublishers = [
+  {
+    sourceCommit: "647702464ec60ee688c8d16aea5922b0b1b600fc",
+    sourceTag: "v0.4.0",
+    runId: 30334062325,
+    attempt: 1,
+    jobId: 90195221537,
+  },
+  {
+    sourceCommit: "68798f74d2f1a545a35a4e3fc3c2225543c9dcf7",
+    sourceTag: "v0.4.1",
+    runId: 30504107513,
+    attempt: 1,
+    jobId: 90750106220,
+  },
+];
+/** Facts must already come from npm's genuine verified SLSA audit. */
+export async function verifyPublishingJobs(facts, seams = {}, output) {
+  if (!Array.isArray(facts) || facts.length > 4)
+    fail("authenticated package set is invalid");
+  const groups = new Map(),
+    names = new Set();
+  for (const fact of facts) {
+    integer(fact.runId);
+    integer(fact.attempt);
+    if (
+      !/^@pegma\/storage-(?:core|azure-tables|cloudflare-d1|dynamodb)$/u.test(
+        fact.name,
+      ) ||
+      names.has(fact.name) ||
+      !/^[a-f0-9]{40}$/u.test(fact.sourceCommit) ||
+      !/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u.test(fact.sourceTag)
+    )
+      fail("authenticated package identity is invalid");
+    names.add(fact.name);
+    const key = JSON.stringify([
+      fact.sourceCommit,
+      fact.sourceTag,
+      fact.runId,
+      fact.attempt,
+    ]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(fact);
+  }
+  const runs = new Map();
   const jobs = [];
-  for (const attempt of new Set(sourceFacts.map((fact) => fact.attempt))) {
+  for (const group of groups.values()) {
+    const { sourceCommit, sourceTag, runId, attempt } = group[0];
+    if (!runs.has(runId))
+      runs.set(
+        runId,
+        await githubJson(
+          "actions/runs/" + runId,
+          seams,
+          output,
+          "github-original-run-" + runId + ".json",
+        ),
+      );
+    const run = runs.get(runId);
+    if (
+      run.id !== runId ||
+      run.head_sha !== sourceCommit ||
+      run.head_branch !== sourceTag ||
+      run.event !== "release" ||
+      run.path !== workflowPath ||
+      !Number.isSafeInteger(run.run_attempt) ||
+      run.run_attempt < attempt ||
+      String(run.repository?.id) !== "1312519623" ||
+      String(run.repository?.owner?.id) !== "309286193"
+    )
+      fail("original publishing run does not match the approved source");
     const page = await githubJson(
-      "actions/runs/" +
-        identity.runId +
-        "/attempts/" +
-        attempt +
-        "/jobs?per_page=100",
+      "actions/runs/" + runId + "/attempts/" + attempt + "/jobs?per_page=100",
       seams,
       output,
-      "github-original-attempt-" + attempt + "-jobs.json",
+      "github-original-run-" + runId + "-attempt-" + attempt + "-jobs.json",
     );
     if (
       !Array.isArray(page.jobs) ||
@@ -832,38 +869,83 @@ async function verifyPublishingJobs(facts, identity, seams, output) {
       page.total_count > 100
     )
       fail("publisher job set is unavailable");
+    const legacy = historicalPublishers.find((entry) => entry.runId === runId);
+    if (
+      legacy &&
+      (legacy.sourceCommit !== sourceCommit ||
+        legacy.sourceTag !== sourceTag ||
+        legacy.attempt !== attempt)
+    )
+      fail("historical publisher binding differs");
+    const stepName = legacy
+      ? "Publish verified prepared tarballs"
+      : "Verify and publish the prepared release";
     const matches = page.jobs.filter((job) => job.name === "publish");
     if (
       matches.length !== 1 ||
       matches[0].status !== "completed" ||
       !["success", "failure"].includes(matches[0].conclusion) ||
-      matches[0].head_sha !== identity.gitCommit ||
-      !matches[0].steps?.some(
-        (step) =>
-          step.name === "Verify and publish the prepared release" &&
-          step.status === "completed" &&
-          ["success", "failure"].includes(step.conclusion),
-      )
+      matches[0].run_id !== runId ||
+      matches[0].run_attempt !== attempt ||
+      matches[0].head_sha !== sourceCommit ||
+      matches[0].head_branch !== sourceTag ||
+      (legacy && matches[0].id !== legacy.jobId) ||
+      !Array.isArray(matches[0].steps) ||
+      matches[0].steps.length > 1000
     )
-      fail("original minimal publisher job is unavailable or ambiguous");
-    const job = matches[0],
+      fail("original publisher job is unavailable or ambiguous");
+    const job = matches[0];
+    integer(job.id);
+    const steps = job.steps.filter((step) =>
+      [
+        "Publish verified prepared tarballs",
+        "Verify and publish the prepared release",
+      ].includes(step.name),
+    );
+    if (
+      steps.length !== 1 ||
+      steps[0].name !== stepName ||
+      steps[0].status !== "completed" ||
+      !["success", "failure"].includes(steps[0].conclusion)
+    )
+      fail("original publishing step is unavailable or ambiguous");
+    const step = steps[0],
       start = Date.parse(job.started_at),
-      end = Date.parse(job.completed_at);
-    if (!Number.isFinite(start) || !Number.isFinite(end))
+      end = Date.parse(job.completed_at),
+      stepStart = Date.parse(step.started_at),
+      stepEnd = Date.parse(step.completed_at);
+    if (
+      ![start, end, stepStart, stepEnd].every(Number.isFinite) ||
+      start > stepStart ||
+      stepStart > stepEnd ||
+      stepEnd > end
+    )
       fail("original publisher time bounds are invalid");
-    for (const fact of sourceFacts.filter((fact) => fact.attempt === attempt)) {
+    for (const fact of group) {
+      const validFrom = Date.parse(fact.certificate?.validFrom),
+        validTo = Date.parse(fact.certificate?.validTo);
       if (
-        Date.parse(fact.certificate.validFrom) > end ||
-        Date.parse(fact.certificate.validTo) < start
+        !Number.isFinite(validFrom) ||
+        !Number.isFinite(validTo) ||
+        validFrom > validTo ||
+        validFrom > stepEnd ||
+        validTo < stepStart
       )
         fail("authenticated certificate does not overlap the actual publisher");
     }
     jobs.push({
       id: job.id,
+      runId,
       attempt,
+      sourceCommit,
+      sourceTag,
+      packages: group.map((fact) => fact.name),
+      stepName,
       conclusion: job.conclusion,
       startedAt: job.started_at,
       completedAt: job.completed_at,
+      stepStartedAt: step.started_at,
+      stepCompletedAt: step.completed_at,
     });
   }
   return jobs;
@@ -927,7 +1009,7 @@ async function verifyRegistryRecords(records, identity, options, seams = {}) {
     const audit = JSON.parse(auditText);
     const { policy, sha256: policySha256 } = await loadReusePolicy();
     const facts = verifyProvenanceAudit(audit, records, identity, policy);
-    const jobs = await verifyPublishingJobs(facts, identity, seams, output);
+    const jobs = await verifyPublishingJobs(facts, seams, output);
     await writeFile(
       join(output, "publishing-jobs.json"),
       JSON.stringify(jobs, null, 2) + "\n",

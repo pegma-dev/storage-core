@@ -19,7 +19,9 @@ import {
   lockVersionSatisfiesSpecifier,
   parseArguments,
   parsePnpmLockfileImporters,
+  prepareRelease,
   publishPreparedRelease,
+  smokePreparedRelease,
   validateLockImporter,
   validateReleaseTag,
   validateRepository,
@@ -669,6 +671,92 @@ async function preparedSchema2() {
 }
 
 describe("selected-source schema2 archives", () => {
+  it.each(["reuse-verification", "consumer-verification"] as const)(
+    "refuses a retained default %s namespace before repository or tool work",
+    async (suffix) => {
+      const root = mkdtempSync(join(tmpdir(), "storage-fresh-admission-"));
+      const proof = join(root, `.release-${suffix}`);
+      mkdirSync(proof);
+      try {
+        // This deliberately incomplete root has no package.json or Git state:
+        // reaching repository admission would fail for a different reason.
+        await expect(
+          prepareRelease({ root, requireClean: true, skipSmoke: true }),
+        ).rejects.toThrow(
+          /release proof output already exists:.*preserve existing evidence and choose a fresh --output/u,
+        );
+        expect(existsSync(proof)).toBe(true);
+        expect(existsSync(join(root, ".release"))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses occupied artifacts and explicit smoke proof before reading a repository or manifest", async () => {
+    const root = mkdtempSync(join(tmpdir(), "storage-fresh-artifact-"));
+    const output = join(root, ".release");
+    mkdirSync(output);
+    writeFileSync(join(output, "retained.txt"), "preserve me");
+    const proof = join(root, "prior-proof");
+    mkdirSync(proof);
+    try {
+      await expect(
+        prepareRelease({ root, requireClean: true }),
+      ).rejects.toThrow(/release output directory must be empty/u);
+      await expect(
+        smokePreparedRelease({
+          manifest: join(root, "missing-manifest.json"),
+          output: proof,
+        }),
+      ).rejects.toThrow(
+        /preserve existing evidence and choose a fresh --output/u,
+      );
+      expect(readFileSync(join(output, "retained.txt"), "utf8")).toBe(
+        "preserve me",
+      );
+      expect(existsSync(proof)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps exactly the default proof siblings ignored in a real clean checkout", () => {
+    const root = mkdtempSync(join(tmpdir(), "storage-default-ignore-"));
+    try {
+      const ignore = readFileSync(
+        new URL("../.gitignore", import.meta.url),
+        "utf8",
+      );
+      expect(ignore.split(/\r?\n/u)).toContain("/.release-reuse-verification/");
+      expect(ignore.split(/\r?\n/u)).toContain(
+        "/.release-consumer-verification/",
+      );
+      expect(ignore).not.toContain("/.release-*/");
+      run(git, ["init", "--quiet"], root);
+      run(git, ["config", "user.name", "Release Fixture"], root);
+      run(git, ["config", "user.email", "release@example.invalid"], root);
+      writeFileSync(join(root, ".gitignore"), ignore);
+      run(git, ["add", ".gitignore"], root);
+      run(
+        git,
+        ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"],
+        root,
+      );
+      for (const name of [
+        ".release",
+        ".release-reuse-verification",
+        ".release-consumer-verification",
+      ]) {
+        mkdirSync(join(root, name));
+        writeFileSync(join(root, name, "proof.json"), "{}\n");
+      }
+      expect(run(git, ["status", "--porcelain"], root)).toBe("");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("withholds every preflight decision when a reused package is unavailable after original-manifest verification", async () => {
     const f = await preparedSchema2();
     try {

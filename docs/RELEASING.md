@@ -123,6 +123,22 @@ independent manifest SHA-256. Every downstream job downloads by ID, not just nam
 Owner preapproval independently checks the actual original API artifact/ZIP
 digest, source/tag, manifest, five-file inventory and all archive bytes.
 
+Local `release:pack` defaults to `.release` and retains sibling proof directories
+`.release-reuse-verification` and `.release-consumer-verification`. These
+default paths are ignored by Git; custom outputs inside the checkout can
+still violate `--require-clean`. Prefer a new output outside the checkout, such
+as `--output ../storage-prepared-unique`, which keeps the same artifact/proof
+sibling layout as `RUNNER_TEMP/storage-prepared` in the release workflow.
+
+Before repository validation, downloads or builds, preparation requires an
+absent or empty regular artifact directory and absent reuse/consumer proof
+siblings. An existing proof directory is refused even when empty or when that
+invocation uses `--skip-smoke`; these three paths identify one retained evidence
+namespace. A repeated explicit smoke `--output` is likewise refused before
+manifest verification or consumer execution. Keep earlier artifacts and proofs
+and choose a new output path. Removing only `.release` does not make its proof
+siblings fresh, and these commands never delete or overwrite previous receipts.
+
 Smoke installs the selected tar and genuine registry Core `0.4.0`/other roots into an
 isolated consumer, scripts disabled and no workspace/source/override fallback.
 It imports public roots, executes published Core conformance against DynamoDB
@@ -145,8 +161,14 @@ ignore-scripts, explicit official registry and provenance. Reused packages are
 never republished. Package imports and crypto tool installation remain outside
 OIDC authority.
 
-The verified npm tool is exactly `11.18.0`; unprivileged verification compares its
-installed files to the pinned official npm archive before executing audit.
+The verified npm tool is exactly `11.18.0`. By default, unprivileged verification
+authenticates the pinned official archive digest, extracts its bounded regular
+file tree into an owned temporary directory and executes that CLI. It does not
+discover or execute host-bundled npm, whose legitimate extra `.bin` links are
+outside the original archive. An explicit `npmCli`/`RELEASE_NPM_CLI` remains a
+strict reviewed path: every file must match the verified official tree, without
+links or extra files, before execution. The minimal OIDC publisher still installs
+nothing and uses its separately pinned Node/npm runtime.
 Raw audit output is retained before any public consumer import, and its hashes
 are checked afterward. Never let a caller-provided qualified boolean or decoded
 bundle substitute for that actual cryptographic command.

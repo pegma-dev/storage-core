@@ -70,14 +70,17 @@ Work on a `claude/*` branch and open a pull request. The gate is
 
 Publishing is trusted-publisher only; no tokens exist. A release starts from a
 protected signed annotated `vX.Y.Z` tag already on `origin/main`, followed by
-`gh release create vX.Y.Z --verify-tag`. The unprivileged preparation job runs
-the gate and packs the exact artifacts; only the minimal publish job receives
-OIDC authority. Publication is integrity-checked, retry-safe, and
+`gh release create vX.Y.Z --verify-tag`. Unprivileged validation jobs run the
+full gates on Node 22 and 24. Preparation depends on that validation and the
+signed-release identity checks, packs only selected source packages, and retains
+the independently pinned exact original registry archives for unselected
+packages. Only the minimal publish job receives OIDC authority.
+Publication is integrity-checked, retry-safe, and
 dependency-ordered. See `docs/RELEASING.md`.
 
 The sole registration exception is a separately reviewed, metadata-only first
-`@pegma/storage-dynamodb@0.4.2` archive under `bootstrap`, published by the
-maintainer with interactive 2FA. It contains no runtime, exports, scripts or
+`@pegma/storage-dynamodb@0.4.2` archive under `bootstrap`, which may be published
+only by the maintainer with interactive 2FA. It contains no runtime, exports, scripts or
 dependencies, is not an SDK/release qualification, and is never a host input.
 Actual runtime publication remains trusted-publisher only.
 

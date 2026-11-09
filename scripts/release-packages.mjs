@@ -393,19 +393,6 @@ function hashTarball(bytes) {
   };
 }
 
-function exportSpecifiers(manifest) {
-  if (
-    manifest.exports === null ||
-    typeof manifest.exports !== "object" ||
-    Array.isArray(manifest.exports)
-  ) {
-    fail(`${manifest.name} must declare object-form exports`);
-  }
-  return Object.keys(manifest.exports).map((key) =>
-    key === "." ? manifest.name : `${manifest.name}${key.slice(1)}`,
-  );
-}
-
 function exportTargets(value) {
   if (typeof value === "string") {
     return [value];
@@ -757,8 +744,51 @@ export async function verifyReleaseInventory(manifestPath, suppliedManifest) {
   return manifest;
 }
 
+async function assertArtifactOutputAvailable(output) {
+  let metadata;
+  try {
+    metadata = await lstat(output);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!metadata.isDirectory() || metadata.isSymbolicLink())
+    fail(
+      `release output must be an empty regular directory: ${output}; preserve existing evidence and choose a fresh --output`,
+    );
+  if ((await readdir(output)).length !== 0)
+    fail(
+      `release output directory must be empty: ${output}; preserve existing evidence and choose a fresh --output`,
+    );
+}
+
+async function assertProofOutputAbsent(output) {
+  try {
+    await lstat(output);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  fail(
+    `release proof output already exists: ${output}; preserve existing evidence and choose a fresh --output`,
+  );
+}
+
 export async function prepareRelease(options = {}) {
-  const { root, packages, releaseTag } = await validateRepository(options);
+  const root = resolve(options.root ?? defaultRoot());
+  const output = resolve(root, options.output ?? ".release");
+  const reuseOutput = output + "-reuse-verification";
+  const consumerOutput = output + "-consumer-verification";
+  // Check one fresh evidence namespace without deleting or modifying any
+  // earlier result. Refuse before repository/tool/network/build work, even if
+  // this invocation skips one of the later proof-producing steps.
+  await assertArtifactOutputAvailable(output);
+  await assertProofOutputAbsent(reuseOutput);
+  await assertProofOutputAbsent(consumerOutput);
+  const { packages, releaseTag } = await validateRepository({
+    ...options,
+    root,
+  });
   const gitCommit = run(gitCommand(), ["rev-parse", "HEAD"], {
     cwd: root,
     capture: true,
@@ -781,10 +811,8 @@ export async function prepareRelease(options = {}) {
     )
       fail("release working source changed during preparation");
   };
-  const output = resolve(root, options.output ?? ".release");
   await mkdir(output, { recursive: true });
-  if ((await readdir(output)).length !== 0)
-    fail("release output directory must be empty");
+  await assertArtifactOutputAvailable(output);
   const { policy, sha256: registryPolicySha256 } = await loadReusePolicy();
   // Development preparation selects the highest candidate version. Only a
   // protected signed release tag can authorize actual publication.
@@ -798,6 +826,20 @@ export async function prepareRelease(options = {}) {
   const selected = packages.filter(
     ({ manifest }) => manifest.version === selectedVersion,
   );
+  const unselected = packages.filter(
+    ({ manifest }) => manifest.version !== selectedVersion,
+  );
+  // Admit the complete reuse subset before any archive download or write.
+  if (
+    unselected.some(
+      ({ manifest }) =>
+        !policy.packages.some(
+          (entry) =>
+            entry.name === manifest.name && entry.version === manifest.version,
+        ),
+    )
+  )
+    fail("unselected workspace has no approved registry reuse policy");
   const records = [];
   for (const { definition, manifest } of packages) {
     if (manifest.version === selectedVersion) continue;
@@ -830,7 +872,7 @@ export async function prepareRelease(options = {}) {
     await verifyReusedPackages(
       records,
       { gitCommit, releaseTag: releaseTag ?? null },
-      { output: output + "-reuse-verification" },
+      { output: reuseOutput },
     );
   }
   assertSource();
@@ -909,7 +951,6 @@ export async function prepareRelease(options = {}) {
     expectedReleaseCommit: gitCommit,
   });
   if (!options.skipSmoke) {
-    const consumerOutput = output + "-consumer-verification";
     await mkdir(consumerOutput);
     await runPublicConsumer(manifest, {
       manifest: manifestPath,
@@ -1138,19 +1179,21 @@ export async function verifyPreparedManifest(manifestPath, options = {}) {
 }
 
 export async function smokePreparedRelease(options = {}) {
+  const output = options.output ? resolve(options.output) : undefined;
+  if (output !== undefined) await assertProofOutputAbsent(output);
   const manifestPath = resolve(
     options.manifest ?? ".release/package-manifest.json",
   );
   const manifest = await verifyPreparedManifest(manifestPath, options);
-  if (options.output) await mkdir(resolve(options.output));
+  if (output !== undefined) await mkdir(output);
   const consumer = await runPublicConsumer(manifest, {
     ...options,
     manifest: manifestPath,
   });
   await verifyPreparedManifest(manifestPath, options);
-  if (options.output)
+  if (output !== undefined)
     await writeFile(
-      join(resolve(options.output), "verification.json"),
+      join(output, "verification.json"),
       JSON.stringify(
         {
           status: "PREPARED_PUBLIC_CONSUMER_PASS",
