@@ -5,10 +5,11 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const workflow = (
@@ -68,6 +69,35 @@ function shellStep(job: string, name: string): string {
   return lines.map((line) => line.replace(/^ {10}/u, "")).join("\n");
 }
 
+function gitBashFromExecPath(output: string): string {
+  const execPath = output.trim();
+  if (!win32.isAbsolute(execPath) || /[\r\n]/u.test(execPath))
+    throw new Error(
+      "Git for Windows returned an invalid executable directory.",
+    );
+  return win32.resolve(execPath, "..", "..", "..", "bin", "bash.exe");
+}
+
+async function bootstrapBash(): Promise<string> {
+  if (process.platform !== "win32") return "/bin/bash";
+  let output: string;
+  try {
+    output = execFileSync("git.exe", ["--exec-path"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 64 * 1024,
+    });
+  } catch {
+    throw new Error(
+      "Git for Windows is required to run the workflow shell tests.",
+    );
+  }
+  const path = gitBashFromExecPath(output);
+  if (!(await stat(path).catch(() => undefined))?.isFile())
+    throw new Error(`Git Bash was not found beside Git for Windows: ${path}`);
+  return path;
+}
+
 function bashPath(path: string): string {
   if (process.platform !== "win32") return path;
   return path
@@ -91,7 +121,12 @@ const probeArguments = [
   "semicolon;literal",
 ];
 type BootstrapMode =
-  "success" | "download" | "digest" | "extract" | "missing-cli";
+  | "success"
+  | "download"
+  | "digest"
+  | "extract"
+  | "missing-cli"
+  | "relative-node";
 interface BootstrapTrace {
   readonly kind: string;
   readonly args?: readonly string[];
@@ -110,6 +145,7 @@ async function runReviewedNpmBootstrap(job: string, mode: BootstrapMode) {
       mkdir(runner),
       mkdir(join(fixture, "package", "bin"), { recursive: true }),
       mkdir(hostBin),
+      mkdir(join(root, "relative")),
     ]);
     const hostNpm = `#!/bin/bash
 printf '%s\\n' '{"kind":"host"}' >> "$TEST_TRACE"
@@ -118,6 +154,7 @@ printf '%s\\n' '11.16.0'
     const stockNpm = hostNpm.replace('"host"', '"stock-wrapper"');
     await Promise.all([
       writeFile(join(hostBin, "npm"), hostNpm),
+      writeFile(join(root, "relative", "node"), "#!/bin/bash\nexit 0\n"),
       writeFile(join(fixture, "package", "bin", "npm"), stockNpm),
       writeFile(join(fixture, "package", "package.json"), '{"type":"module"}'),
       writeFile(githubPath, ""),
@@ -126,6 +163,7 @@ printf '%s\\n' '11.16.0'
     ]);
     await Promise.all([
       chmod(join(hostBin, "npm"), 0o700),
+      chmod(join(root, "relative", "node"), 0o700),
       chmod(join(fixture, "package", "bin", "npm"), 0o700),
     ]);
     if (mode !== "missing-cli")
@@ -142,16 +180,35 @@ process.stdout.write(args.length===1&&args[0]==="--version"?"11.18.0\\n":JSON.st
     // Download, digest verification and extraction are explicitly controlled
     // external ports; these synthetic bytes are NOT a real npm/crypto proof.
     const controlledTools = `
+command() {
+  if [[ "$TEST_MODE" == 'relative-node' && "$#" == 2 && "$1" == '-v' && "$2" == 'node' ]]; then
+    printf '%s\\n' 'relative/node'
+    return 0
+  fi
+  builtin command "$@"
+}
 curl() {
   printf '%s\\n' '{"kind":"download"}' >> "$TEST_TRACE"
-  local output='' url=''
+  local output='' url='' proto='' proxy='unset' max_time='' max_size=''
+  local disabled=false fail=false silent=false show_error=false
+  [[ "$1" == '--disable' ]] || return 91
   while (( $# )); do
     case "$1" in
+      --disable) disabled=true; shift ;;
+      --fail) fail=true; shift ;;
+      --silent) silent=true; shift ;;
+      --show-error) show_error=true; shift ;;
+      --proto) proto="$2"; shift 2 ;;
+      --proxy) proxy="$2"; shift 2 ;;
+      --max-time) max_time="$2"; shift 2 ;;
+      --max-filesize) max_size="$2"; shift 2 ;;
       --output) output="$2"; shift 2 ;;
       https://*) url="$1"; shift ;;
-      *) shift ;;
+      *) return 91 ;;
     esac
   done
+  [[ "$disabled" == true && "$fail" == true && "$silent" == true && "$show_error" == true ]] || return 91
+  [[ "$proto" == '=https' && "$proxy" == '' && "$max_time" == 60 && "$max_size" == 16777216 ]] || return 91
   [[ "$url" == 'https://registry.npmjs.org/npm/-/npm-11.18.0.tgz' && -n "$output" ]] || return 91
   if [[ "$TEST_MODE" == 'download' ]]; then return 31; fi
   printf '%s' 'synthetic archive bytes, not real npm' > "$output"
@@ -168,13 +225,19 @@ sha256sum() {
 tar() {
   printf '%s\\n' '{"kind":"extract"}' >> "$TEST_TRACE"
   local archive='' destination=''
+  local extract=false gzip=false no_owner=false no_permissions=false
   while (( $# )); do
     case "$1" in
+      --extract) extract=true; shift ;;
+      --gzip) gzip=true; shift ;;
       --file) archive="$2"; shift 2 ;;
       --directory) destination="$2"; shift 2 ;;
-      *) shift ;;
+      --no-same-owner) no_owner=true; shift ;;
+      --no-same-permissions) no_permissions=true; shift ;;
+      *) return 94 ;;
     esac
   done
+  [[ "$extract" == true && "$gzip" == true && "$no_owner" == true && "$no_permissions" == true ]] || return 94
   [[ -s "$archive" && -n "$destination" ]] || return 94
   if [[ "$TEST_MODE" == 'extract' ]]; then return 33; fi
   cp -R -- "$TEST_ARCHIVE_FIXTURE/package" "$destination/package"
@@ -187,6 +250,9 @@ tar() {
 ${controlledTools}
 printf 'HOST_VERSION='
 npm --version
+if [[ "$TEST_MODE" == 'relative-node' ]]; then
+  [[ -f relative/node && -x relative/node ]] || exit 95
+fi
 ${shellStep(job, "Bootstrap the reviewed npm CLI")}
 IFS= read -r reviewed_bin < "$GITHUB_PATH"
 export PATH="$reviewed_bin:$PATH"
@@ -196,9 +262,7 @@ printf 'OWNED_ARGUMENTS='
 npm ${probeArguments.map(shellQuote).join(" ")}
 `;
     const result = spawnSync(
-      process.platform === "win32"
-        ? "C:/Program Files/Git/bin/bash.exe"
-        : "/bin/bash",
+      await bootstrapBash(),
       ["--noprofile", "--norc", "-c", script],
       {
         cwd: root,
@@ -238,6 +302,32 @@ npm ${probeArguments.map(shellQuote).join(" ")}
 }
 
 describe("publish workflow", () => {
+  it.each([
+    {
+      execPath: String.raw`C:\Program Files\Git\mingw64\libexec\git-core`,
+      bash: String.raw`C:\Program Files\Git\bin\bash.exe`,
+    },
+    {
+      execPath: String.raw`D:\developer tools\Git\mingw64\libexec\git-core`,
+      bash: String.raw`D:\developer tools\Git\bin\bash.exe`,
+    },
+    {
+      execPath: "E:/scoop/apps/git/current/mingw64/libexec/git-core\n",
+      bash: String.raw`E:\scoop\apps\git\current\bin\bash.exe`,
+    },
+  ])(
+    "resolves Git Bash beside the actual Git installation: $execPath",
+    ({ execPath, bash }) => {
+      expect(gitBashFromExecPath(execPath)).toBe(bash);
+    },
+  );
+
+  it("keeps the actual preparation and publishing bootstrap shell bodies identical", () => {
+    expect(shellStep("prepare", "Bootstrap the reviewed npm CLI")).toBe(
+      shellStep("publish", "Bootstrap the reviewed npm CLI"),
+    );
+  });
+
   it.each(bootstrapJobs)(
     "%s bootstraps reviewed npm after Node setup and before version checks or consumers",
     (name) => {
@@ -260,7 +350,7 @@ describe("publish workflow", () => {
   );
 
   it.each(bootstrapJobs)(
-    "%s actual shell selects the owned reviewed CLI over host npm11.16 and preserves literal arguments",
+    "%s actual shell selects the owned reviewed CLI over host npm 11.16 and preserves literal arguments",
     async (job) => {
       const f = await runReviewedNpmBootstrap(job, "success");
       expect(f.result.error).toBeUndefined();
@@ -317,6 +407,12 @@ describe("publish workflow", () => {
         mode: "missing-cli" as const,
         status: 1,
         calls: ["host", "download", "digest", "extract"],
+      },
+      {
+        job,
+        mode: "relative-node" as const,
+        status: 1,
+        calls: ["host"],
       },
     ]),
   )(
