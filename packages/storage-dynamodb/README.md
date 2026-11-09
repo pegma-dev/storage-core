@@ -3,16 +3,17 @@
 Amazon DynamoDB adapter for
 [`@pegma/storage-core`](https://www.npmjs.com/package/@pegma/storage-core).
 
-Source `0.4.5` is the unpublished first trusted runtime candidate and pins
-released Core `0.4.0`. Version `0.4.2` was published as registration-only metadata,
+[`0.4.5` is the qualified trusted runtime](https://github.com/pegma-dev/storage-core/releases/tag/v0.4.5)
+and pins released Core `0.4.0`. Version `0.4.2` was published as registration-only metadata,
 with no runtime exports/scripts/dependencies; it is not this adapter or a host
 dependency. The `v0.4.3` release attempt failed its npm-version check before
 preparation, producing no runtime archive. The `v0.4.4` attempt completed
 preparation and smoke checks, then failed the preflight CLI entry with a module
 cycle (exit 13). Neither published a runtime. Both signed tags remain immutable;
 retain their releases as failed attempts.
-Source merge and metadata registration do not establish runtime publication,
-registry provenance or host acceptance. See the
+The `0.4.5` release completed exact-byte, signature/provenance, source and public
+consumer verification; this does not establish a host's production acceptance.
+Source merge and metadata registration alone do not qualify a runtime. See the
 [release policy](https://github.com/pegma-dev/storage-core/blob/main/docs/RELEASING.md).
 
 It stores every collection in one DynamoDB table. The hash key is the

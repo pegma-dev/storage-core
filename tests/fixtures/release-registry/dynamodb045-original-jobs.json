@@ -1,0 +1,836 @@
+{
+  "total_count": 8,
+  "jobs": [
+    {
+      "id": 129369152320,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHwCbQA",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129369152320",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129369152320",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:01:11Z",
+      "started_at": "2026-11-09T19:01:14Z",
+      "completed_at": "2026-11-09T19:01:18Z",
+      "name": "identity",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:01:14Z",
+          "completed_at": "2026-11-09T19:01:15Z"
+        },
+        {
+          "name": "Verify the release tag",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:01:15Z",
+          "completed_at": "2026-11-09T19:01:16Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:01:16Z",
+          "completed_at": "2026-11-09T19:01:16Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129369152320",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004211,
+      "runner_name": "GitHub Actions 1000004211",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129369226701,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHwG9zQ",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129369226701",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129369226701",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:01:19Z",
+      "started_at": "2026-11-09T19:01:21Z",
+      "completed_at": "2026-11-09T19:02:34Z",
+      "name": "Node.js 24",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:01:22Z",
+          "completed_at": "2026-11-09T19:01:23Z"
+        },
+        {
+          "name": "Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:01:23Z",
+          "completed_at": "2026-11-09T19:01:24Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:01:24Z",
+          "completed_at": "2026-11-09T19:01:24Z"
+        },
+        {
+          "name": "Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:01:24Z",
+          "completed_at": "2026-11-09T19:01:24Z"
+        },
+        {
+          "name": "Enable Corepack",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:01:24Z",
+          "completed_at": "2026-11-09T19:01:25Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:01:25Z",
+          "completed_at": "2026-11-09T19:01:30Z"
+        },
+        {
+          "name": "Check formatting",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:01:30Z",
+          "completed_at": "2026-11-09T19:01:32Z"
+        },
+        {
+          "name": "Check types",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-09T19:01:32Z",
+          "completed_at": "2026-11-09T19:01:33Z"
+        },
+        {
+          "name": "Run tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-09T19:01:33Z",
+          "completed_at": "2026-11-09T19:02:31Z"
+        },
+        {
+          "name": "Check release metadata",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-09T19:02:31Z",
+          "completed_at": "2026-11-09T19:02:32Z"
+        },
+        {
+          "name": "Post Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-09T19:02:32Z",
+          "completed_at": "2026-11-09T19:02:32Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-11-09T19:02:32Z",
+          "completed_at": "2026-11-09T19:02:32Z"
+        },
+        {
+          "name": "Post Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-11-09T19:02:32Z",
+          "completed_at": "2026-11-09T19:02:32Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-11-09T19:02:32Z",
+          "completed_at": "2026-11-09T19:02:32Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129369226701",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004212,
+      "runner_name": "GitHub Actions 1000004212",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129369227040,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHwG_IA",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129369227040",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129369227040",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:01:19Z",
+      "started_at": "2026-11-09T19:01:21Z",
+      "completed_at": "2026-11-09T19:02:39Z",
+      "name": "Node.js 22",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:01:22Z",
+          "completed_at": "2026-11-09T19:01:23Z"
+        },
+        {
+          "name": "Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:01:23Z",
+          "completed_at": "2026-11-09T19:01:25Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:01:25Z",
+          "completed_at": "2026-11-09T19:01:25Z"
+        },
+        {
+          "name": "Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:01:25Z",
+          "completed_at": "2026-11-09T19:01:25Z"
+        },
+        {
+          "name": "Enable Corepack",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:01:25Z",
+          "completed_at": "2026-11-09T19:01:25Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:01:25Z",
+          "completed_at": "2026-11-09T19:01:31Z"
+        },
+        {
+          "name": "Check formatting",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:01:31Z",
+          "completed_at": "2026-11-09T19:01:34Z"
+        },
+        {
+          "name": "Check types",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-09T19:01:34Z",
+          "completed_at": "2026-11-09T19:01:35Z"
+        },
+        {
+          "name": "Run tests",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-09T19:01:35Z",
+          "completed_at": "2026-11-09T19:02:35Z"
+        },
+        {
+          "name": "Check release metadata",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-09T19:02:35Z",
+          "completed_at": "2026-11-09T19:02:35Z"
+        },
+        {
+          "name": "Post Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 18,
+          "started_at": "2026-11-09T19:02:35Z",
+          "completed_at": "2026-11-09T19:02:35Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 19,
+          "started_at": "2026-11-09T19:02:35Z",
+          "completed_at": "2026-11-09T19:02:35Z"
+        },
+        {
+          "name": "Post Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 20,
+          "started_at": "2026-11-09T19:02:35Z",
+          "completed_at": "2026-11-09T19:02:35Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 21,
+          "started_at": "2026-11-09T19:02:35Z",
+          "completed_at": "2026-11-09T19:02:36Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129369227040",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004213,
+      "runner_name": "GitHub Actions 1000004213",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129369992918,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHw1u1g",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129369992918",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129369992918",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:02:39Z",
+      "started_at": "2026-11-09T19:02:42Z",
+      "completed_at": "2026-11-09T19:03:07Z",
+      "name": "prepare",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:02:43Z",
+          "completed_at": "2026-11-09T19:02:43Z"
+        },
+        {
+          "name": "Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:02:44Z",
+          "completed_at": "2026-11-09T19:02:45Z"
+        },
+        {
+          "name": "Configure checkout tag verification",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:02:45Z",
+          "completed_at": "2026-11-09T19:02:45Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:02:45Z",
+          "completed_at": "2026-11-09T19:02:49Z"
+        },
+        {
+          "name": "Bootstrap the reviewed npm CLI",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:02:49Z",
+          "completed_at": "2026-11-09T19:02:50Z"
+        },
+        {
+          "name": "Check the npm version",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:02:50Z",
+          "completed_at": "2026-11-09T19:02:50Z"
+        },
+        {
+          "name": "Enable Corepack",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:02:50Z",
+          "completed_at": "2026-11-09T19:02:50Z"
+        },
+        {
+          "name": "Install dependencies",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 8,
+          "started_at": "2026-11-09T19:02:50Z",
+          "completed_at": "2026-11-09T19:02:55Z"
+        },
+        {
+          "name": "Pack the release files",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 9,
+          "started_at": "2026-11-09T19:02:55Z",
+          "completed_at": "2026-11-09T19:03:03Z"
+        },
+        {
+          "name": "Seal the release inventory",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 10,
+          "started_at": "2026-11-09T19:03:03Z",
+          "completed_at": "2026-11-09T19:03:03Z"
+        },
+        {
+          "name": "Upload the prepared release",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 11,
+          "started_at": "2026-11-09T19:03:03Z",
+          "completed_at": "2026-11-09T19:03:04Z"
+        },
+        {
+          "name": "Retain genuine registry reuse proof",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-11-09T19:03:04Z",
+          "completed_at": "2026-11-09T19:03:05Z"
+        },
+        {
+          "name": "Record original artifact identity",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-09T19:03:05Z",
+          "completed_at": "2026-11-09T19:03:05Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 25,
+          "started_at": "2026-11-09T19:03:05Z",
+          "completed_at": "2026-11-09T19:03:05Z"
+        },
+        {
+          "name": "Post Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 26,
+          "started_at": "2026-11-09T19:03:05Z",
+          "completed_at": "2026-11-09T19:03:05Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 27,
+          "started_at": "2026-11-09T19:03:05Z",
+          "completed_at": "2026-11-09T19:03:05Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129369992918",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004214,
+      "runner_name": "GitHub Actions 1000004214",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129370261175,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHxGGtw",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129370261175",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129370261175",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:03:08Z",
+      "started_at": "2026-11-09T19:03:10Z",
+      "completed_at": "2026-11-09T19:03:31Z",
+      "name": "smoke",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:03:11Z",
+          "completed_at": "2026-11-09T19:03:12Z"
+        },
+        {
+          "name": "Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:03:12Z",
+          "completed_at": "2026-11-09T19:03:13Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:03:13Z",
+          "completed_at": "2026-11-09T19:03:17Z"
+        },
+        {
+          "name": "Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:03:17Z",
+          "completed_at": "2026-11-09T19:03:17Z"
+        },
+        {
+          "name": "Download the prepared release copy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:03:17Z",
+          "completed_at": "2026-11-09T19:03:18Z"
+        },
+        {
+          "name": "Smoke-test the prepared release copy",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:03:18Z",
+          "completed_at": "2026-11-09T19:03:28Z"
+        },
+        {
+          "name": "Retain public consumer proof",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:03:28Z",
+          "completed_at": "2026-11-09T19:03:29Z"
+        },
+        {
+          "name": "Post Set up Java for DynamoDB Local",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 12,
+          "started_at": "2026-11-09T19:03:29Z",
+          "completed_at": "2026-11-09T19:03:29Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-09T19:03:29Z",
+          "completed_at": "2026-11-09T19:03:29Z"
+        },
+        {
+          "name": "Post Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-11-09T19:03:29Z",
+          "completed_at": "2026-11-09T19:03:30Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-11-09T19:03:30Z",
+          "completed_at": "2026-11-09T19:03:30Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129370261175",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004215,
+      "runner_name": "GitHub Actions 1000004215",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129370497187,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHxUgow",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129370497187",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129370497187",
+      "status": "completed",
+      "conclusion": "success",
+      "created_at": "2026-11-09T19:03:33Z",
+      "started_at": "2026-11-09T19:03:36Z",
+      "completed_at": "2026-11-09T19:03:56Z",
+      "name": "preflight",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:03:37Z",
+          "completed_at": "2026-11-09T19:03:38Z"
+        },
+        {
+          "name": "Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:03:38Z",
+          "completed_at": "2026-11-09T19:03:39Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:03:39Z",
+          "completed_at": "2026-11-09T19:03:44Z"
+        },
+        {
+          "name": "Download the original prepared release",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:03:44Z",
+          "completed_at": "2026-11-09T19:03:45Z"
+        },
+        {
+          "name": "Verify registry preflight",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:03:45Z",
+          "completed_at": "2026-11-09T19:03:53Z"
+        },
+        {
+          "name": "Seal registry preflight",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:03:53Z",
+          "completed_at": "2026-11-09T19:03:53Z"
+        },
+        {
+          "name": "Retain registry preflight",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:03:53Z",
+          "completed_at": "2026-11-09T19:03:54Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 13,
+          "started_at": "2026-11-09T19:03:54Z",
+          "completed_at": "2026-11-09T19:03:54Z"
+        },
+        {
+          "name": "Post Check out the exact release commit",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 14,
+          "started_at": "2026-11-09T19:03:54Z",
+          "completed_at": "2026-11-09T19:03:55Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 15,
+          "started_at": "2026-11-09T19:03:55Z",
+          "completed_at": "2026-11-09T19:03:55Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129370497187",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004216,
+      "runner_name": "GitHub Actions 1000004216",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129370713574,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeHxht5g",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129370713574",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129370713574",
+      "status": "completed",
+      "conclusion": "failure",
+      "created_at": "2026-11-09T19:03:57Z",
+      "started_at": "2026-11-09T19:15:46Z",
+      "completed_at": "2026-11-09T19:16:36Z",
+      "name": "publish",
+      "steps": [
+        {
+          "name": "Set up job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 1,
+          "started_at": "2026-11-09T19:15:47Z",
+          "completed_at": "2026-11-09T19:15:47Z"
+        },
+        {
+          "name": "Verify the release tag",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 2,
+          "started_at": "2026-11-09T19:15:47Z",
+          "completed_at": "2026-11-09T19:15:48Z"
+        },
+        {
+          "name": "Set up Node.js",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 3,
+          "started_at": "2026-11-09T19:15:48Z",
+          "completed_at": "2026-11-09T19:15:52Z"
+        },
+        {
+          "name": "Bootstrap the reviewed npm CLI",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 4,
+          "started_at": "2026-11-09T19:15:52Z",
+          "completed_at": "2026-11-09T19:15:53Z"
+        },
+        {
+          "name": "Check the npm version",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 5,
+          "started_at": "2026-11-09T19:15:53Z",
+          "completed_at": "2026-11-09T19:15:53Z"
+        },
+        {
+          "name": "Download the prepared release",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 6,
+          "started_at": "2026-11-09T19:15:53Z",
+          "completed_at": "2026-11-09T19:15:54Z"
+        },
+        {
+          "name": "Download sealed registry preflight",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 7,
+          "started_at": "2026-11-09T19:15:54Z",
+          "completed_at": "2026-11-09T19:15:55Z"
+        },
+        {
+          "name": "Verify and publish the prepared release",
+          "status": "completed",
+          "conclusion": "failure",
+          "number": 8,
+          "started_at": "2026-11-09T19:15:55Z",
+          "completed_at": "2026-11-09T19:16:34Z"
+        },
+        {
+          "name": "Post Set up Node.js",
+          "status": "completed",
+          "conclusion": "skipped",
+          "number": 16,
+          "started_at": "2026-11-09T19:16:34Z",
+          "completed_at": "2026-11-09T19:16:34Z"
+        },
+        {
+          "name": "Complete job",
+          "status": "completed",
+          "conclusion": "success",
+          "number": 17,
+          "started_at": "2026-11-09T19:16:34Z",
+          "completed_at": "2026-11-09T19:16:34Z"
+        }
+      ],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129370713574",
+      "labels": ["ubuntu-latest"],
+      "runner_id": 1000004217,
+      "runner_name": "GitHub Actions 1000004217",
+      "runner_group_id": 0,
+      "runner_group_name": "GitHub Actions"
+    },
+    {
+      "id": 129377933848,
+      "run_id": 42679292292,
+      "workflow_name": "Publish",
+      "head_branch": "v0.4.5",
+      "run_url": "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292",
+      "run_attempt": 1,
+      "node_id": "CR_kwDOTjt1x88AAAAeH4aaGA",
+      "head_sha": "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      "url": "https://api.github.com/repos/pegma-dev/storage-core/actions/jobs/129377933848",
+      "html_url": "https://github.com/pegma-dev/storage-core/actions/runs/42679292292/job/129377933848",
+      "status": "completed",
+      "conclusion": "skipped",
+      "created_at": "2026-11-09T19:16:37Z",
+      "started_at": "2026-11-09T19:16:37Z",
+      "completed_at": "2026-11-09T19:16:36Z",
+      "name": "verify",
+      "steps": [],
+      "check_run_url": "https://api.github.com/repos/pegma-dev/storage-core/check-runs/129377933848",
+      "labels": ["ubuntu-latest"],
+      "runner_id": null,
+      "runner_name": null,
+      "runner_group_id": null,
+      "runner_group_name": null
+    }
+  ]
+}

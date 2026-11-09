@@ -27,6 +27,7 @@ import {
   downloadRegistryArtifact,
   inspectReleaseTarball,
   isolatedVerificationEnvironment,
+  loadReusePolicy,
   registryReuseOrigin,
   verifyProvenanceAudit,
   verifyPublishingJobs,
@@ -364,6 +365,84 @@ async function historicalWriterFixture() {
       : new Response(null, { status: 404 });
   });
   return { records, audit, facts, responses, fetch, policyBytes };
+}
+
+async function modernWriterFixture() {
+  const historical = await historicalWriterFixture();
+  const { policy } = await loadReusePolicy();
+  const releases = [
+    ...historicalReleases,
+    {
+      name: "@pegma/storage-dynamodb",
+      version: "0.4.5",
+      directory: "storage-dynamodb",
+      bundle: "dynamodb045-slsa.json",
+    },
+  ];
+  expect(
+    policy.packages.map(({ name, version }) => ({ name, version })),
+  ).toEqual(releases.map(({ name, version }) => ({ name, version })));
+  const records = releases.map(({ name, version, directory }) => {
+    const entry = policy.packages.find(
+      (candidate) => candidate.name === name && candidate.version === version,
+    );
+    if (entry === undefined) throw new Error("Missing qualified reuse pin.");
+    const bytes = fixture(`${directory}-${version}.tgz`);
+    expect(bytes.length).toBe(entry.size);
+    expect(digest(bytes)).toBe(entry.sha256);
+    expect(`sha512-${digest(bytes, "sha512", "base64")}`).toBe(entry.integrity);
+    const inspected = inspectReleaseTarball(bytes);
+    expect(inspected.package.name).toBe(name);
+    expect(inspected.package.version).toBe(version);
+    return {
+      ...entry,
+      origin: registryReuseOrigin(entry),
+      publish: false,
+      tarball: `${name.slice(1).replace("/", "-")}-${version}.tgz`,
+      ...inspected,
+    };
+  });
+  // Genuine captured bundles behind the scripted trusted-audit boundary only.
+  // These unit tests do not execute npm or authenticate ECDSA/Sigstore; the
+  // separate qualified 0.4.5 release retains that actual cryptographic proof.
+  const audit = {
+    invalid: [],
+    missing: [],
+    verified: records.map((record, index) => ({
+      name: record.name,
+      version: record.version,
+      location: `node_modules/${record.name}`,
+      registry: REGISTRY,
+      attestationBundles: [
+        JSON.parse(fixture(releases[index]!.bundle).toString("utf8")),
+      ],
+    })),
+  };
+  // All four origins are registryReuse. No future D1 source/writer identity is
+  // manufactured by the otherwise-unused source identity argument.
+  const facts = verifyProvenanceAudit(audit, records, identity, policy);
+  const runUrl =
+    "https://api.github.com/repos/pegma-dev/storage-core/actions/runs/42679292292";
+  const jobsUrl = `${runUrl}/attempts/1/jobs?per_page=100`;
+  // Literal API responses retained by the actual qualified release verifier:
+  // latest run metadata is attempt 2, while its authenticated writer is in 1.
+  const runBytes = fixture("dynamodb045-original-run.json");
+  const jobsBytes = fixture("dynamodb045-original-jobs.json");
+  const run = JSON.parse(runBytes.toString("utf8")) as Record<string, unknown>;
+  const page = JSON.parse(jobsBytes.toString("utf8")) as Record<
+    string,
+    unknown
+  >;
+  const responses = new Map(historical.responses);
+  responses.set(runUrl, run);
+  responses.set(jobsUrl, page);
+  const fetch = vi.fn(async (url: string | URL | Request) => {
+    const response = responses.get(String(url));
+    return response
+      ? Response.json(response)
+      : new Response(null, { status: 404 });
+  });
+  return { records, audit, facts, policy, run, page, runUrl, jobsUrl, fetch };
 }
 
 describe("historical three-entry registry reuse source policy", () => {
@@ -842,6 +921,136 @@ describe("all authenticated historical writer observations", () => {
         verifyPublishingJobs(f.facts, { fetch: f.fetch }),
       ).rejects.toThrow();
       expect(f.fetch).toHaveBeenCalled();
+    },
+  );
+});
+
+describe("qualified modern 0.4.5 reuse writer observations", () => {
+  it.each([
+    {
+      scope: "Dynamo045 alone",
+      names: ["@pegma/storage-dynamodb"],
+      ids: [129370713574],
+    },
+    {
+      scope: "all four qualified roots",
+      names: historicalReleases
+        .map(({ name }) => String(name))
+        .concat("@pegma/storage-dynamodb"),
+      ids: [90195221537, 90750106220, 129370713574],
+    },
+    {
+      scope: "the three unselected roots for a D1 source release",
+      names: [
+        "@pegma/storage-core",
+        "@pegma/storage-azure-tables",
+        "@pegma/storage-dynamodb",
+      ],
+      ids: [90195221537, 129370713574],
+    },
+  ])("authenticates the original groups for $scope", async ({ names, ids }) => {
+    const f = await modernWriterFixture();
+    const facts = f.facts.filter(({ name }) => names.includes(name));
+    const modern = facts.find(({ name }) => name === "@pegma/storage-dynamodb");
+    if (modern === undefined)
+      throw new Error("Missing modern provenance fact.");
+    expect(modern).toMatchObject({
+      version: "0.4.5",
+      sourceCommit: "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      sourceTag: "v0.4.5",
+      runId: 42679292292,
+      attempt: 1,
+    });
+    expect(f.run).toMatchObject({
+      id: 42679292292,
+      head_sha: "a5a5d0bfe6355df89c049fcec3148845c5124735",
+      head_branch: "v0.4.5",
+      run_attempt: 2,
+      conclusion: "success",
+    });
+    const jobs = await verifyPublishingJobs(facts, { fetch: f.fetch });
+    expect(jobs.map(({ id }) => id).sort((a, b) => a - b)).toEqual(ids);
+    expect(jobs.flatMap(({ packages }) => packages).sort()).toEqual(
+      [...names].sort(),
+    );
+    const writer = jobs.find(({ id }) => id === 129370713574);
+    expect(writer).toMatchObject({
+      runId: 42679292292,
+      attempt: 1,
+      conclusion: "failure",
+      packages: ["@pegma/storage-dynamodb"],
+      stepName: "Verify and publish the prepared release",
+      stepStartedAt: "2026-11-09T19:15:55Z",
+      stepCompletedAt: "2026-11-09T19:16:34Z",
+    });
+    expect(Date.parse(modern.certificate.validFrom)).toBe(
+      Date.parse("2026-11-09T19:15:58Z"),
+    );
+    expect(Date.parse(modern.certificate.validTo)).toBe(
+      Date.parse("2026-11-09T19:25:58Z"),
+    );
+    expect(jobs.map(({ id }) => id)).not.toContain(129382605514);
+    expect(f.fetch).toHaveBeenCalledTimes(ids.length * 2);
+    const requests = f.fetch.mock.calls.map(([url]) => String(url));
+    expect(requests).toContain(f.runUrl);
+    expect(requests).toContain(f.jobsUrl);
+    expect(requests.some((url) => url.includes("/attempts/2/"))).toBe(false);
+  });
+
+  it("cannot rebind genuine attempt-one provenance to the successful recovery attempt", async () => {
+    const f = await modernWriterFixture();
+    const record = f.records.find(
+      ({ name }) => name === "@pegma/storage-dynamodb",
+    );
+    if (record === undefined) throw new Error("Missing modern archive.");
+    const rebound = {
+      ...record,
+      origin: { ...record.origin, originalRunAttempt: 2 },
+    };
+    expect(() =>
+      verifyProvenanceAudit(f.audit, [rebound], identity, f.policy),
+    ).toThrow(/authenticated original registry invocation differs/u);
+    expect(f.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["recovery-job", "legacy-step", "certificate-window"] as const)(
+    "refuses a modern %s substitution instead of crediting the recovery",
+    async (fault) => {
+      const f = await modernWriterFixture();
+      const job = (f.page.jobs as Array<Record<string, unknown>>).find(
+        (candidate) => candidate.name === "publish",
+      );
+      if (job === undefined)
+        throw new Error("Missing original modern publisher.");
+      const step = (job.steps as Array<Record<string, unknown>>).find(
+        (candidate) =>
+          candidate.name === "Verify and publish the prepared release",
+      );
+      if (step === undefined)
+        throw new Error("Missing original publishing step.");
+      // Deliberately tampered responses for negative cases, not new API facts.
+      if (fault === "recovery-job") {
+        job.id = 129382605514;
+        job.run_attempt = 2;
+      } else if (fault === "legacy-step") {
+        step.name = "Publish verified prepared tarballs";
+      } else {
+        job.started_at = step.started_at = "2020-01-01T00:00:00Z";
+        job.completed_at = step.completed_at = "2020-01-01T00:01:00Z";
+      }
+      await expect(
+        verifyPublishingJobs(
+          f.facts.filter(({ name }) => name === "@pegma/storage-dynamodb"),
+          { fetch: f.fetch },
+        ),
+      ).rejects.toThrow(
+        fault === "certificate-window"
+          ? /certificate does not overlap/u
+          : fault === "legacy-step"
+            ? /original publishing step/u
+            : /original publisher job/u,
+      );
+      expect(f.fetch).toHaveBeenCalledTimes(2);
     },
   );
 });

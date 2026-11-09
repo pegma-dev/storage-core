@@ -3,6 +3,11 @@
 Cloudflare D1 adapter for
 [`@pegma/storage-core`](https://www.npmjs.com/package/@pegma/storage-core).
 
+The published release remains `0.4.1`. This source is the unpublished `0.4.6`
+candidate for optional concurrent keyed-read batching and retains exact Core
+`0.4.0`. Its review, registry qualification and complete host request-budget
+acceptance remain pending; source tests alone do not establish live Free usage.
+
 It stores every collection in one D1 database and one `RECORDS` data table.
 The physical partition key is `<collection>:<partition>` and the row key is
 the record id. All values are passed through prepared statements.
@@ -111,13 +116,17 @@ keep their existing paths. Batching does not add snapshot or read/write
 ordering guarantees: retain version checks and current-state fences. A new
 read after an awaited write still reads the direct primary binding.
 
-Cloudflare counts a `batch()` as one query against the invocation query
-limit, while statement constraints and row-based usage still apply. A larger
-batch reduces binding calls, not rows read or serialization work. Choose the
+Cloudflare's [current D1 limits](https://developers.cloudflare.com/d1/platform/limits/)
+allow 50 queries per Free Worker invocation; one `db.batch()` counts as one
+query against that limit, not one per statement. The limit of 100 bound
+parameters applies to each individual query, not the whole batch. The adapter's
+512-statement tuning ceiling is not a Cloudflare batch-size limit.
+Statement constraints and row-based usage still apply. A larger batch reduces
+binding calls, not rows read or serialization work. Choose the
 size for the application's bounded record sizes and concurrent callers;
 512 arbitrary large records can exceed platform memory or result limits.
 Measure complete request budgets, including authentication and final fences,
-before relying on a Free-plan profile. See [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).
+before relying on a Free-plan profile.
 
 ## Versions and deletes
 
