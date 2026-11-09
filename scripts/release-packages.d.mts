@@ -1,3 +1,5 @@
+import type { PreparedManifest } from "./release-registry-verify.mjs";
+
 export interface ReleasePackageDefinition {
   readonly directory: string;
   readonly name: string;
@@ -11,6 +13,7 @@ export interface ValidationOptions {
   readonly requireClean?: boolean;
   readonly requireMainAncestor?: boolean;
   readonly requireReleaseTag?: boolean;
+  readonly expectedManifestSha256?: string;
 }
 
 export interface ReleaseCommandOptions extends ValidationOptions {
@@ -80,7 +83,12 @@ export function decidePublication(
 
 export function prepareRelease(
   options?: ReleaseCommandOptions,
-): Promise<{ manifestPath: string; manifest: unknown }>;
+): Promise<{ manifestPath: string; manifest: PreparedManifest }>;
+
+export function verifyPreparedManifest(
+  manifestPath: string,
+  options?: ValidationOptions,
+): Promise<PreparedManifest>;
 
 export function verifyReleaseInventory(
   manifestPath: string,

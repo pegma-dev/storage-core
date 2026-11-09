@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -9,7 +10,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { gzipSync } from "node:zlib";
+import { describe, expect, it, vi } from "vitest";
 import {
   RELEASE_PACKAGES,
   decidePublication,
@@ -17,11 +19,19 @@ import {
   lockVersionSatisfiesSpecifier,
   parseArguments,
   parsePnpmLockfileImporters,
+  publishPreparedRelease,
   validateLockImporter,
   validateReleaseTag,
   validateRepository,
   verifyReleaseInventory,
+  verifyPreparedManifest,
 } from "../scripts/release-packages.mjs";
+import {
+  inspectReleaseTarball,
+  loadReusePolicy,
+  preflightRegistry,
+  registryReuseOrigin,
+} from "../scripts/release-registry-verify.mjs";
 
 const git = process.platform === "win32" ? "git.exe" : "git";
 const releaseVersion = (
@@ -79,14 +89,14 @@ describe("release package metadata", () => {
       scripts?: { prepack?: string };
     }>;
 
-    // The scan contract released core, Azure, and D1 at 0.4.0. D1 carries
-    // a patch of its own; DynamoDB is the next unused repository-wide
-    // number. Every adapter pins the port exactly where it was published.
+    // Core/Azure040 and D1041 retain their original registry bytes. Dynamo043
+    // is the reviewed runtime candidate; registration-only042 is no SDK.
+    // Every adapter pins the port exactly where it was published.
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
       { name: "@pegma/storage-cloudflare-d1", version: "0.4.1" },
-      { name: "@pegma/storage-dynamodb", version: "0.4.2" },
+      { name: "@pegma/storage-dynamodb", version: "0.4.3" },
     ]);
     for (const adapter of manifests.slice(1)) {
       expect(adapter.dependencies?.["@pegma/storage-core"]).toBe("0.4.0");
@@ -381,7 +391,11 @@ describe("release source authentication", () => {
     expect(prepareStart).toBeGreaterThanOrEqual(0);
     expect(publishStart).toBeGreaterThan(prepareStart);
     const prepare = jobs.slice(prepareStart, publishStart);
-    const publish = jobs.slice(publishStart);
+    const nextJob = jobs.indexOf("\n  verify:", publishStart);
+    const publish = jobs.slice(
+      publishStart,
+      nextJob === -1 ? undefined : nextJob,
+    );
     expect(prepare).not.toContain("id-token: write");
     expect(prepare).toContain("--skip-smoke");
     expect(prepare).toContain("include-hidden-files: false");
@@ -409,7 +423,7 @@ describe("prepared release files", () => {
       "pegma-storage-core-0.4.0.tgz",
       "pegma-storage-azure-tables-0.4.0.tgz",
       "pegma-storage-cloudflare-d1-0.4.1.tgz",
-      "pegma-storage-dynamodb-0.4.2.tgz",
+      "pegma-storage-dynamodb-0.4.3.tgz",
     ].map((tarball) => ({ tarball }));
     for (const { tarball } of packages) {
       writeFileSync(join(root, tarball), tarball);
@@ -460,6 +474,7 @@ describe("prepared release files", () => {
         HOME: "home",
         CI: "1",
         GITHUB_ACTIONS: "true",
+        RUNNER_ENVIRONMENT: "github-hosted",
         ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.invalid",
         NPM_TOKEN: "not-kept",
         NODE_AUTH_TOKEN: "not-kept",
@@ -477,6 +492,7 @@ describe("prepared release files", () => {
       HOME: "home",
       CI: "1",
       GITHUB_ACTIONS: "true",
+      RUNNER_ENVIRONMENT: "github-hosted",
       ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.invalid",
       NPM_CONFIG_USERCONFIG: "/private/userconfig",
       NPM_CONFIG_GLOBALCONFIG: "/private/globalconfig",
@@ -499,5 +515,394 @@ describe("retry-safe publication", () => {
     expect(() => decidePublication(integrity, "sha512-ZGlmZmVyZW50")).toThrow(
       "different tarball integrity",
     );
+  });
+});
+
+interface PreparedRecord {
+  name: string;
+  version: string;
+  directory: string;
+  tarball: string;
+  size: number;
+  shasum: string;
+  sha256: string;
+  integrity: string;
+  publish: boolean;
+  package: Record<string, unknown>;
+  files: Array<{ path: string; size: number }>;
+  origin: Record<string, unknown>;
+}
+
+interface PreparedManifest {
+  schemaVersion: number;
+  repository: string;
+  gitCommit: string;
+  releaseTag: string;
+  registryPolicySha256: string;
+  packages: PreparedRecord[];
+}
+
+function sourceArchive(metadata: Record<string, unknown>): Buffer {
+  const files = new Map([
+    ["package/package.json", JSON.stringify(metadata)],
+    ["package/README.md", "Unsigned source-archive parser fixture"],
+    ["package/LICENSE", "MIT"],
+    ["package/dist/index.js", "export const fixture = true;"],
+    ["package/dist/index.d.ts", "export declare const fixture: true;"],
+  ]);
+  const chunks: Buffer[] = [];
+  for (const [path, text] of files) {
+    const body = Buffer.from(text),
+      header = Buffer.alloc(512);
+    header.write(path, 0, 100, "utf8");
+    header.write("0000644\0", 100, "ascii");
+    header.write("0000000\0", 108, "ascii");
+    header.write("0000000\0", 116, "ascii");
+    header.write(
+      `${body.length.toString(8).padStart(11, "0")}\0`,
+      124,
+      "ascii",
+    );
+    header.write("00000000000\0", 136, "ascii");
+    header.fill(32, 148, 156);
+    header.write("0", 156, "ascii");
+    header.write("ustar\0", 257, "ascii");
+    header.write("00", 263, "ascii");
+    const sum = header.reduce((total, byte) => total + byte, 0);
+    header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, "ascii");
+    chunks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+  }
+  return gzipSync(Buffer.concat([...chunks, Buffer.alloc(1024)]));
+}
+
+async function preparedSchema2() {
+  const root = mkdtempSync(join(tmpdir(), "storage-schema2-"));
+  const output = join(root, "prepared");
+  mkdirSync(output);
+  run(git, ["init", "--quiet"], root);
+  run(git, ["config", "user.name", "Release Fixture"], root);
+  run(git, ["config", "user.email", "release@example.invalid"], root);
+  writeFileSync(join(root, "README.md"), "Fictional release source\n");
+  run(git, ["add", "README.md"], root);
+  run(
+    git,
+    ["-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture"],
+    root,
+  );
+  const gitCommit = run(git, ["rev-parse", "HEAD"], root);
+  const { policy, sha256: registryPolicySha256 } = await loadReusePolicy();
+  const packages: PreparedRecord[] = [];
+  for (const entry of policy.packages) {
+    const bytes = readFileSync(
+      new URL(
+        `./fixtures/release-registry/${entry.directory}-${entry.version}.tgz`,
+        import.meta.url,
+      ),
+    );
+    const inspected = inspectReleaseTarball(bytes);
+    const tarball = `${entry.name.slice(1).replace("/", "-")}-${entry.version}.tgz`;
+    writeFileSync(join(output, tarball), bytes);
+    packages.push({
+      name: entry.name,
+      version: entry.version,
+      directory: entry.directory,
+      tarball,
+      size: bytes.length,
+      shasum: entry.shasum,
+      sha256: entry.sha256,
+      integrity: entry.integrity,
+      publish: false,
+      package: inspected.package,
+      files: [...inspected.files],
+      origin: { ...registryReuseOrigin(entry) },
+    });
+  }
+  const metadata = JSON.parse(
+    readFileSync(
+      new URL("../packages/storage-dynamodb/package.json", import.meta.url),
+      "utf8",
+    ),
+  ) as Record<string, unknown>;
+  const sourceDirectory = join(root, "packages", "storage-dynamodb");
+  mkdirSync(sourceDirectory, { recursive: true });
+  writeFileSync(
+    join(sourceDirectory, "package.json"),
+    JSON.stringify(metadata),
+  );
+  const bytes = sourceArchive(metadata),
+    inspected = inspectReleaseTarball(bytes);
+  const tarball = "pegma-storage-dynamodb-0.4.3.tgz";
+  writeFileSync(join(output, tarball), bytes);
+  packages.push({
+    name: "@pegma/storage-dynamodb",
+    version: "0.4.3",
+    directory: "storage-dynamodb",
+    tarball,
+    size: bytes.length,
+    shasum: createHash("sha1").update(bytes).digest("hex"),
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+    integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
+    publish: true,
+    files: [...inspected.files],
+    package: inspected.package,
+    origin: {
+      kind: "source",
+      repository: "pegma-dev/storage-core",
+      gitCommit,
+      releaseTag: "v0.4.3",
+      directory: "storage-dynamodb",
+    },
+  });
+  const manifest: PreparedManifest = {
+    schemaVersion: 2,
+    repository: "pegma-dev/storage-core",
+    gitCommit,
+    releaseTag: "v0.4.3",
+    registryPolicySha256,
+    packages,
+  };
+  const manifestPath = join(output, "package-manifest.json");
+  const save = () =>
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+  save();
+  return { root, output, manifest, manifestPath, save };
+}
+
+describe("selected-source schema2 archives", () => {
+  it("withholds every preflight decision when a reused package is unavailable after original-manifest verification", async () => {
+    const f = await preparedSchema2();
+    try {
+      const expectedManifestSha256 = createHash("sha256")
+        .update(readFileSync(f.manifestPath))
+        .digest("hex");
+      const options = {
+        root: f.root,
+        manifest: f.manifestPath,
+        expectedReleaseCommit: f.manifest.gitCommit,
+        expectedManifestSha256,
+        runId: 12345,
+        runAttempt: 2,
+        output: join(f.root, "proof"),
+      };
+      const verified = await verifyPreparedManifest(f.manifestPath, options);
+      const fetch = vi.fn(async () => new Response(null, { status: 404 }));
+      const run = vi.fn();
+      await expect(
+        preflightRegistry(verified, options, { fetch, run }),
+      ).rejects.toThrow(/original registry package is missing/u);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(fetch.mock.calls[0]).toEqual([
+        "https://registry.npmjs.org/%40pegma%2Fstorage-core/0.4.0",
+        expect.objectContaining({ redirect: "error" }),
+      ]);
+      expect(run).not.toHaveBeenCalled();
+      expect(existsSync(options.output)).toBe(false);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects Core043 source labeling over the genuine Core040 archive and package metadata", async () => {
+    const f = await preparedSchema2();
+    try {
+      const record = f.manifest.packages[0]!;
+      expect(record.package.version).toBe("0.4.0");
+      const originalPath = join(f.output, record.tarball);
+      record.version = "0.4.3";
+      record.tarball = "pegma-storage-core-0.4.3.tgz";
+      record.publish = true;
+      record.origin = {
+        kind: "source",
+        repository: f.manifest.repository,
+        gitCommit: f.manifest.gitCommit,
+        releaseTag: f.manifest.releaseTag,
+        directory: record.directory,
+      };
+      // Preserve the genuine old archive/hash and make the independent source
+      // metadata agree with its old package.json, so those later comparisons
+      // cannot mask the required record.version <-> package.version refusal.
+      writeFileSync(join(f.output, record.tarball), readFileSync(originalPath));
+      rmSync(originalPath);
+      const sourceDirectory = join(f.root, "packages", "storage-core");
+      mkdirSync(sourceDirectory, { recursive: true });
+      writeFileSync(
+        join(sourceDirectory, "package.json"),
+        JSON.stringify(record.package),
+      );
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow("prepared artifact metadata is invalid");
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies exactly three pinned originals and one source candidate without rebuilding the originals", async () => {
+    const f = await preparedSchema2();
+    try {
+      const expectedManifestSha256 = createHash("sha256")
+        .update(readFileSync(f.manifestPath))
+        .digest("hex");
+      const actual = await verifyPreparedManifest(f.manifestPath, {
+        root: f.root,
+        expectedReleaseCommit: f.manifest.gitCommit,
+        expectedManifestSha256,
+      });
+      expect(actual).toEqual(f.manifest);
+      expect(f.manifest.packages.map(({ publish }) => publish)).toEqual([
+        false,
+        false,
+        false,
+        true,
+      ]);
+      expect(f.manifest.packages[0]!.origin.sourceCommit).not.toBe(
+        f.manifest.gitCommit,
+      );
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects independent artifact-digest, current-source and policy swaps", async () => {
+    const f = await preparedSchema2();
+    try {
+      await expect(
+        verifyPreparedManifest(f.manifestPath, {
+          root: f.root,
+          expectedManifestSha256: "0".repeat(64),
+        }),
+      ).rejects.toThrow(/digest/u);
+      await expect(
+        verifyPreparedManifest(f.manifestPath, {
+          root: f.root,
+          expectedReleaseCommit: "0".repeat(40),
+        }),
+      ).rejects.toThrow(/checkout/u);
+      f.manifest.registryPolicySha256 = "0".repeat(64);
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/policy digest/u);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces every closed origin key and the source/original-source distinction", async () => {
+    const f = await preparedSchema2();
+    try {
+      for (const record of f.manifest.packages) {
+        const original = structuredClone(record.origin);
+        for (const key of Object.keys(original)) {
+          record.origin = { ...original };
+          delete record.origin[key];
+          f.save();
+          await expect(
+            verifyPreparedManifest(f.manifestPath, { root: f.root }),
+          ).rejects.toThrow(/origin/u);
+        }
+        record.origin = { ...original, extra: "not admitted" };
+        f.save();
+        await expect(
+          verifyPreparedManifest(f.manifestPath, { root: f.root }),
+        ).rejects.toThrow(/origin/u);
+        record.origin = original;
+      }
+      f.manifest.packages[0]!.origin.sourceCommit = f.manifest.gitCommit;
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/independent policy/u);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects source/reuse relabeling, package-order swaps and unexpected top-level fields", async () => {
+    const f = await preparedSchema2();
+    try {
+      f.manifest.packages[0]!.publish = true;
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/source origin/u);
+      f.manifest.packages[0]!.publish = false;
+      [f.manifest.packages[0], f.manifest.packages[1]] = [
+        f.manifest.packages[1]!,
+        f.manifest.packages[0]!,
+      ];
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/inventory/u);
+      [f.manifest.packages[0], f.manifest.packages[1]] = [
+        f.manifest.packages[1]!,
+        f.manifest.packages[0]!,
+      ];
+      writeFileSync(
+        f.manifestPath,
+        JSON.stringify({ ...f.manifest, trusted: true }),
+      );
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/identity/u);
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects changed selected exports/dependencies and changed literal original tar bytes", async () => {
+    const f = await preparedSchema2();
+    try {
+      const selected = f.manifest.packages[3]!;
+      const original = structuredClone(selected.package);
+      selected.package = {
+        ...original,
+        dependencies: { "@pegma/storage-core": "0.4.1" },
+      };
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/source/u);
+      selected.package = { ...original, exports: { ".": "./private.js" } };
+      f.save();
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow(/source/u);
+      selected.package = original;
+      f.save();
+      const first = f.manifest.packages[0]!,
+        path = join(f.output, first.tarball),
+        bytes = readFileSync(path);
+      bytes[0] = bytes[0]! ^ 1;
+      writeFileSync(path, bytes);
+      await expect(
+        verifyPreparedManifest(f.manifestPath, { root: f.root }),
+      ).rejects.toThrow();
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses the alternate publisher before even reading a malicious or missing artifact", async () => {
+    await expect(
+      publishPreparedRelease({
+        manifest: "does-not-exist",
+        root: "does-not-exist",
+      }),
+    ).rejects.toThrow(/disabled.*protected GitHub release workflow/u);
+    const source = readFileSync(
+      new URL("../scripts/release-packages.mjs", import.meta.url),
+      "utf8",
+    );
+    const body =
+      /export async function publishPreparedRelease\([^]*?\n\}/u.exec(
+        source,
+      )?.[0];
+    expect(body).toBeDefined();
+    expect(body).not.toContain("runNpm");
+    expect(body).not.toContain("readFile");
+    expect(body).not.toContain("queryRegistry");
   });
 });

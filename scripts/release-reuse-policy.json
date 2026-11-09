@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "repository": "pegma-dev/storage-core",
+  "repositoryId": "1312519623",
+  "ownerId": "309286193",
+  "builder": "https://github.com/actions/runner/github-hosted",
+  "packages": [
+    {
+      "name": "@pegma/storage-core",
+      "version": "0.4.0",
+      "directory": "storage-core",
+      "tarballUrl": "https://registry.npmjs.org/@pegma/storage-core/-/storage-core-0.4.0.tgz",
+      "size": 24625,
+      "sha256": "8fe21519d16f3c94f43c9477714ea08afa9b72fb4a2f0bf0b4c1b1905096a8cf",
+      "integrity": "sha512-aWbRhhis4Qs4TvH1Sb+OCI0a0ddOyV+6pm6HhPs+XPlaP86mTaV7OlwkIIPqk5Hw45t//tNaqfaggUeOc7rIGA==",
+      "shasum": "ba65320d15291c1093b320fbc9ae6a70c04913fb",
+      "sourceCommit": "647702464ec60ee688c8d16aea5922b0b1b600fc",
+      "sourceTag": "v0.4.0",
+      "workflowPath": ".github/workflows/publish.yml",
+      "originalRunId": 30334062325,
+      "originalRunAttempt": 1
+    },
+    {
+      "name": "@pegma/storage-azure-tables",
+      "version": "0.4.0",
+      "directory": "storage-azure-tables",
+      "tarballUrl": "https://registry.npmjs.org/@pegma/storage-azure-tables/-/storage-azure-tables-0.4.0.tgz",
+      "size": 10534,
+      "sha256": "bbe26f50cc60d2f45334bbd3d3455ffff7a541b84485123dfe8925e74be46a60",
+      "integrity": "sha512-cHVrLyQRf8qu2d83fgO7spPxKxAZlOOfvEi/t38S6l3SD2678khJvUMcvAHm/rAQ8BlReDWd6WSnIZuQiI3A1Q==",
+      "shasum": "2b7f788759274905e7d395305c2988973eaf3e81",
+      "sourceCommit": "647702464ec60ee688c8d16aea5922b0b1b600fc",
+      "sourceTag": "v0.4.0",
+      "workflowPath": ".github/workflows/publish.yml",
+      "originalRunId": 30334062325,
+      "originalRunAttempt": 1
+    },
+    {
+      "name": "@pegma/storage-cloudflare-d1",
+      "version": "0.4.1",
+      "directory": "storage-cloudflare-d1",
+      "tarballUrl": "https://registry.npmjs.org/@pegma/storage-cloudflare-d1/-/storage-cloudflare-d1-0.4.1.tgz",
+      "size": 11967,
+      "sha256": "5e354776b5260d7c0342389daaeb91856022d7375d599708219d8f43786c3301",
+      "integrity": "sha512-nVH+ppAWi3QwyEX8QVkPOLXNjtblO0jDnnGqCHpbZZzPvFQAVyd/1Bhxg8JdsuOD/UWGktJ26asAKzpNjRol0w==",
+      "shasum": "888f77cf8bd2e3cdd96904da3c3fe77989202021",
+      "sourceCommit": "68798f74d2f1a545a35a4e3fc3c2225543c9dcf7",
+      "sourceTag": "v0.4.1",
+      "workflowPath": ".github/workflows/publish.yml",
+      "originalRunId": 30504107513,
+      "originalRunAttempt": 1
+    }
+  ]
+}
