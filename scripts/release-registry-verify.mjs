@@ -1463,5 +1463,16 @@ async function main() {
 if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
-)
-  await main();
+) {
+  // Finish module evaluation before main imports the producer/registry cycle.
+  // An unsettled CLI stays failed; only completed verification may succeed.
+  process.exitCode = 13;
+  main()
+    .then(() => {
+      process.exitCode = 0;
+    })
+    .catch((error) => {
+      process.exitCode = 1;
+      console.error(error instanceof Error ? error.message : String(error));
+    });
+}

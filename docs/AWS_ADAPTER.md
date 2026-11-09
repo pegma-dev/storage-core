@@ -4,12 +4,14 @@
 
 The runtime adapter is implemented in this repository. It qualifies when every
 conformance case passes against **Amazon DynamoDB Local** and the release gates
-are satisfied. `@pegma/storage-dynamodb@0.4.4` is the unpublished first trusted
+are satisfied. `@pegma/storage-dynamodb@0.4.5` is the unpublished first trusted
 runtime candidate. Version `0.4.2` was published as a separately reviewed,
 metadata-only registration archive: it contains no runtime, exports, scripts or
 dependencies, is not an SDK, and must never be a host input. The `v0.4.3` release
-attempt failed before preparation, producing no runtime archive or publication.
-Its signed tag remains immutable; retain the release as a failed attempt.
+attempt failed its npm-version check before preparation, producing no runtime
+archive. The `v0.4.4` attempt completed preparation and smoke checks, then failed
+the preflight CLI entry with a module cycle (exit 13). Neither published a
+runtime. Keep both signed tags immutable and retain the failed releases.
 Runtime qualification remains pending.
 
 Decided 2026-09-11. This is the assignment record for Storage Core's third
@@ -80,10 +82,11 @@ Node 22 + 24.
 
 The port is unchanged, so `@pegma/storage-core` stays at `0.4.0` and the runtime
 candidate pins it exactly. `0.4.2` is registration-only metadata under `bootstrap`,
-not a usable adapter release. The first trusted runtime candidate is `0.4.4`;
+not a usable adapter release. The first trusted runtime candidate is `0.4.5`;
 its publication requires the reviewed signed-source and trusted-publisher flow.
-Existing repository-wide tags `v0.4.0`, `v0.4.1` and failed `v0.4.3` must never
-be reused. The later D1 feature is planned as `0.4.5`, after its own review.
+Existing repository-wide tags `v0.4.0`, `v0.4.1`, failed `v0.4.3` and failed
+`v0.4.4` must never be reused. The later D1 feature is planned as `0.4.6`, after
+its own review.
 
 Unprivileged validation runs the full gates on Node 22 and 24 before preparation.
 Preparation depends on that validation and signed-release identity checks; it
