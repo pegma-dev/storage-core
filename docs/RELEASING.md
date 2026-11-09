@@ -178,11 +178,16 @@ conformance run does not exercise the D1 adapter. Before merge or publication,
 owner acceptance additionally requires an isolated selected D1 tarball plus
 genuine canonical registry Core `0.4.0`, with no aliases, overrides or workspace
 resolution. Copy the existing full D1 suite, changing only its adapter import to
-the bare package, and run all 141 cases against real Miniflare plus the
-[public type fixture](../test/d1-public-types.ts) on Node 22 and 24 using the
-[D1 test configuration](../vitest.d1.config.ts). Retain the lockfile, archive and
-suite hashes, and constructor-resolution evidence. This packed proof remains
-pending; source-suite passes do not satisfy it or establish live Free acceptance.
+the bare package. Run every conformance case exported by published Core `0.4.0`
+in both default and `readBatchSize: 512` modes and all adapter-specific cases
+against real Miniflare on Node 22 and 24, with no skips, using the
+[D1 test configuration](../vitest.d1.config.ts). Typecheck the
+[public type fixture](../test/d1-public-types.ts) on both lanes.
+Record actual case counts, the lockfile, archive and complete suite/input hashes,
+and constructor-resolution evidence. Published Core's case count can differ from
+the workspace suite; require the full suite from pinned inputs, not a fixed
+workspace count. Source-suite
+passes do not satisfy this separate packed gate or establish live Free acceptance.
 
 ## Preflight and minimal publish
 

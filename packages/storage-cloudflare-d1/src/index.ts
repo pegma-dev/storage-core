@@ -312,7 +312,9 @@ export interface CloudflareD1StoreOptions {
    * Defaults to 1, retaining direct keyed reads. Must be an integer from 1
    * through 512. Larger values suit bounded small records, not arbitrary rows.
    *
-   * Opt-in queues belong to this Store instance: construct it per request.
+   * This limits each physical batch, not the total pending queue. Opt-in
+   * queues belong to this Store instance and have no size limit. Callers must
+   * bound concurrent read waves and construct the Store per request.
    * No values are cached, and writes/internal optimistic reads are unchanged.
    */
   readonly readBatchSize?: number;
@@ -325,6 +327,18 @@ interface PendingRead {
   readonly reject: (reason: unknown) => void;
 }
 
+function recordRow(row: PhysicalRow | null): RecordRow | null {
+  return row === null || row.deleted === 1 || row.record_json === null
+    ? null
+    : { record_json: row.record_json, version: row.version };
+}
+
+/**
+ * Batch results are positional: validate every slot and row before assigning
+ * any result to its caller. These runtime shape checks are opt-in only.
+ * Direct first<PhysicalRow>() keeps its existing typed-binding behavior;
+ * SELECT_ONE's cast and the STRICT schema enforce these row types in real D1.
+ */
 function batchRows(
   results: CloudflareD1Result<PhysicalRow>[],
   expected: number,
@@ -600,9 +614,7 @@ export function createCloudflareD1Store(
 
       async function read(key: EntityKey): Promise<RecordRow | null> {
         const row = await readPhysical(key);
-        return row === null || row.deleted === 1 || row.record_json === null
-          ? null
-          : { record_json: row.record_json, version: row.version };
+        return recordRow(row);
       }
 
       async function readForGet(key: EntityKey): Promise<RecordRow | null> {
@@ -610,9 +622,7 @@ export function createCloudflareD1Store(
           readBatchSize === 1
             ? await readPhysical(key)
             : await queuedRead(partitionKey(key.partition), key.id);
-        return row === null || row.deleted === 1 || row.record_json === null
-          ? null
-          : { record_json: row.record_json, version: row.version };
+        return recordRow(row);
       }
 
       function decodeRow(row: RecordRow): VersionedRecord<T> {

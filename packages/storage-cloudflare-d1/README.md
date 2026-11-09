@@ -104,6 +104,10 @@ without waiting for more calls. Collection handles on that Store share the
 queue; separate Store instances do not. Use a request-scoped Store rather
 than sharing the queue across Worker requests.
 
+`readBatchSize` bounds each D1 batch, not the total pending read requests.
+The adapter has no total pending-queue cap. Callers must bound their concurrent
+read waves and the Store's lifetime within the request.
+
 Only calls that actually reach storage concurrently can coalesce. Finish
 asynchronous key preparation before starting a parallel read wave if the
 caller needs predictable batching. Sequential awaited calls remain separate.
