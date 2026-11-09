@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -26,15 +27,11 @@ import {
   downloadRegistryArtifact,
   inspectReleaseTarball,
   isolatedVerificationEnvironment,
-  loadReusePolicy,
-  preflightRegistry,
   registryReuseOrigin,
-  runPublicConsumer,
   verifyProvenanceAudit,
   verifyPublishingJobs,
   verifyReusedPackages,
   validateReusePolicy,
-  verifyRegistryRelease,
 } from "../scripts/release-registry-verify.mjs";
 import type {
   PreparedManifest,
@@ -81,6 +78,46 @@ const digest = (
   algorithm = "sha256",
   encoding: "hex" | "base64" = "hex",
 ) => createHash(algorithm).update(bytes).digest(encoding);
+
+const historicalPolicyFile = new URL(
+  "./fixtures/release-reuse-policy-historical-three-entry.json",
+  import.meta.url,
+);
+const historicalReleases = [
+  {
+    name: "@pegma/storage-core",
+    version: "0.4.0",
+    directory: "storage-core",
+    bundle: "core040-slsa.json",
+  },
+  {
+    name: "@pegma/storage-azure-tables",
+    version: "0.4.0",
+    directory: "storage-azure-tables",
+    bundle: "azure040-slsa.json",
+  },
+  {
+    name: "@pegma/storage-cloudflare-d1",
+    version: "0.4.1",
+    directory: "storage-cloudflare-d1",
+    bundle: "d1041-slsa.json",
+  },
+] as const;
+
+/** Retained literal policy for the genuine old archives/bundles below. Future
+ * live policy additions are not evidence for these historical test inputs. */
+function historicalPolicyFixture() {
+  const bytes = readFileSync(historicalPolicyFile);
+  const sha256 = digest(bytes);
+  expect(sha256).toBe(
+    "ca417c9e1db17cd80f2af1257a93fbaa27b7d73c03b3712cacbca227546744b4",
+  );
+  const policy = validateReusePolicy(JSON.parse(bytes.toString("utf8")));
+  expect(
+    policy.packages.map(({ name, version }) => ({ name, version })),
+  ).toEqual(historicalReleases.map(({ name, version }) => ({ name, version })));
+  return { policy, sha256, bytes };
+}
 
 function packageJson() {
   return {
@@ -190,8 +227,13 @@ interface BundleFixture {
 }
 
 async function provenanceFixture() {
-  const { policy } = await loadReusePolicy();
-  const entry = policy.packages[0]!;
+  const { policy } = historicalPolicyFixture();
+  const entry = policy.packages.find(
+    ({ name, version }) =>
+      name === "@pegma/storage-core" && version === "0.4.0",
+  );
+  if (entry === undefined)
+    throw new Error("Missing historical Core 0.4.0 pin.");
   const record = {
     ...entry,
     origin: registryReuseOrigin(entry),
@@ -236,21 +278,20 @@ function changeClaim(bundle: BundleFixture, path: string[], value: unknown) {
 }
 
 async function historicalWriterFixture() {
-  const { policy } = await loadReusePolicy();
-  const bundleFiles = [
-    "core040-slsa.json",
-    "azure040-slsa.json",
-    "d1041-slsa.json",
-  ];
-  const records = policy.packages.map((entry) => ({
-    ...entry,
-    origin: registryReuseOrigin(entry),
-    publish: false,
-    tarball: `${entry.name.slice(1).replace("/", "-")}-${entry.version}.tgz`,
-    ...inspectReleaseTarball(
-      fixture(`${entry.directory}-${entry.version}.tgz`),
-    ),
-  }));
+  const { policy, bytes: policyBytes } = historicalPolicyFixture();
+  const records = historicalReleases.map(({ name, version, directory }) => {
+    const entry = policy.packages.find(
+      (candidate) => candidate.name === name && candidate.version === version,
+    );
+    if (entry === undefined) throw new Error("Missing historical release pin.");
+    return {
+      ...entry,
+      origin: registryReuseOrigin(entry),
+      publish: false,
+      tarball: `${name.slice(1).replace("/", "-")}-${version}.tgz`,
+      ...inspectReleaseTarball(fixture(`${directory}-${version}.tgz`)),
+    };
+  });
   // A scripted trusted npm-output boundary, NOT a claim that this test ran
   // ECDSA/Sigstore. Every nested signed bundle is the genuine public fixture.
   const audit = {
@@ -262,7 +303,7 @@ async function historicalWriterFixture() {
       location: `node_modules/${record.name}`,
       registry: REGISTRY,
       attestationBundles: [
-        JSON.parse(fixture(bundleFiles[index]!).toString("utf8")),
+        JSON.parse(fixture(historicalReleases[index]!.bundle).toString("utf8")),
       ],
     })),
   };
@@ -322,12 +363,12 @@ async function historicalWriterFixture() {
       ? Response.json(response)
       : new Response(null, { status: 404 });
   });
-  return { records, audit, facts, responses, fetch };
+  return { records, audit, facts, responses, fetch, policyBytes };
 }
 
-describe("registry reuse source policy", () => {
-  it("accepts only a unique canonical inventory subset without inventing a future runtime pin", async () => {
-    const { policy } = await loadReusePolicy();
+describe("historical three-entry registry reuse source policy", () => {
+  it("accepts only a unique canonical historical inventory subset without inventing a future runtime pin", () => {
+    const { policy } = historicalPolicyFixture();
     expect(validateReusePolicy({ ...policy, packages: [] }).packages).toEqual(
       [],
     );
@@ -360,8 +401,8 @@ describe("registry reuse source policy", () => {
     ).toBe(false);
   });
 
-  it("pins the original literal archives and their original publishing sources", async () => {
-    const { policy, sha256 } = await loadReusePolicy();
+  it("pins the original literal archives and their original publishing sources", () => {
+    const { policy, sha256 } = historicalPolicyFixture();
     expect(sha256).toMatch(/^[a-f0-9]{64}$/u);
     expect(policy.repository).toBe("pegma-dev/storage-core");
     expect(
@@ -1171,6 +1212,61 @@ async function pipelineFixture() {
         join(root, "packages", directory, file),
       );
   }
+  // This is an explicitly historical unsigned source fixture, not a future
+  // runtime archive. Keep its version matrix separate from the live workspace.
+  const versions: Record<string, string> = {
+    ...Object.fromEntries(
+      historicalReleases.map(({ name, version }) => [name, version]),
+    ),
+    "@pegma/storage-dynamodb": "0.4.3",
+  };
+  for (const directory of [
+    "storage-core",
+    "storage-azure-tables",
+    "storage-cloudflare-d1",
+    "storage-dynamodb",
+  ]) {
+    const path = join(root, "packages", directory, "package.json");
+    const metadata = JSON.parse(readFileSync(path, "utf8"));
+    const version = versions[metadata.name];
+    if (version === undefined) throw new Error("Unexpected fixture package.");
+    metadata.version = version;
+    writeFileSync(path, JSON.stringify(metadata));
+  }
+  const rootManifestPath = join(root, "package.json");
+  const rootManifest = JSON.parse(readFileSync(rootManifestPath, "utf8"));
+  const previousD1 =
+    rootManifest.devDependencies["@pegma/storage-cloudflare-d1"];
+  if (typeof previousD1 !== "string")
+    throw new Error("Missing fixture workspace dependency.");
+  rootManifest.devDependencies["@pegma/storage-cloudflare-d1"] =
+    "workspace:0.4.1";
+  writeFileSync(rootManifestPath, JSON.stringify(rootManifest));
+  const lockPath = join(root, "pnpm-lock.yaml");
+  writeFileSync(
+    lockPath,
+    readFileSync(lockPath, "utf8").replaceAll(
+      "specifier: " + previousD1,
+      "specifier: workspace:0.4.1",
+    ),
+  );
+  // Execute byte-identical CURRENT validators at a fixture-owned module URL.
+  // Their import.meta-relative policy is the retained three-entry input; no
+  // validation body, filesystem read, or digest is replaced by a test stub.
+  const scripts = join(root, "scripts");
+  mkdirSync(scripts);
+  for (const name of ["release-packages.mjs", "release-registry-verify.mjs"]) {
+    const original = new URL(`../scripts/${name}`, import.meta.url);
+    const destination = join(scripts, name);
+    copyFileSync(original, destination);
+    expect(digest(readFileSync(destination))).toBe(
+      digest(readFileSync(original)),
+    );
+  }
+  copyFileSync(
+    historicalPolicyFile,
+    join(scripts, "release-reuse-policy.json"),
+  );
   const git = process.platform === "win32" ? "git.exe" : "git";
   const gitRun = (args: string[]) =>
     execFileSync(git, args, { cwd: root, encoding: "utf8" }).trim();
@@ -1488,8 +1584,27 @@ async function pipelineFixture() {
       };
     },
   };
+  // Bind controlled process tools on the first load too: a native module cache
+  // must never preserve real npm execution for these orchestration fixtures.
+  const registry: typeof import("../scripts/release-registry-verify.mjs") =
+    await (async () => {
+      vi.resetModules();
+      vi.doMock("node:child_process", async (importOriginal) => ({
+        ...(await importOriginal<typeof import("node:child_process")>()),
+        spawnSync: command,
+      }));
+      try {
+        return await import(
+          pathToFileURL(join(scripts, "release-registry-verify.mjs")).href
+        );
+      } finally {
+        vi.doUnmock("node:child_process");
+        vi.resetModules();
+      }
+    })();
   return {
     root,
+    registry,
     records,
     tarballs,
     historical,
@@ -1650,7 +1765,10 @@ async function controlledPrepare(
   }));
   vi.stubGlobal("fetch", f.seams.fetch);
   try {
-    const { prepareRelease } = await import("../scripts/release-packages.mjs");
+    const { prepareRelease }: typeof import("../scripts/release-packages.mjs") =
+      await import(
+        pathToFileURL(join(f.root, "scripts", "release-packages.mjs")).href
+      );
     const metadata = JSON.parse(
       readFileSync(
         join(f.root, "packages", "storage-dynamodb", "package.json"),
@@ -1673,9 +1791,9 @@ async function controlledPrepare(
   }
 }
 
-/** Execute the actual workflow SEAL with the real strict manifest reader.
- * The temp re-export changes only module location, never validation behavior.
- * No upload action, npm audit, SDK runtime or registry qualification is claimed. */
+/** Execute the actual workflow SEAL with the byte-identical current strict
+ * reader and explicit historical policy copied by pipelineFixture. No upload
+ * action, npm audit, SDK runtime or registry qualification is claimed. */
 function actualInventorySeal(
   f: Awaited<ReturnType<typeof pipelineFixture>>,
   prepared: { manifestPath: string; manifest: PreparedManifest },
@@ -1696,18 +1814,13 @@ function actualInventorySeal(
         join(directory, name),
       );
     const scripts = join(f.root, "scripts");
-    mkdirSync(scripts, { recursive: true });
-    const actualReader = new URL(
-      "../scripts/release-packages.mjs",
-      import.meta.url,
-    ).href;
+    for (const name of ["release-packages.mjs", "release-registry-verify.mjs"])
+      expect(digest(readFileSync(join(scripts, name)))).toBe(
+        digest(readFileSync(new URL(`../scripts/${name}`, import.meta.url))),
+      );
     writeFileSync(
-      join(scripts, "release-packages.mjs"),
-      `export {verifyPreparedManifest} from ${JSON.stringify(actualReader)};\n`,
-    );
-    copyFileSync(
-      new URL("../scripts/release-reuse-policy.json", import.meta.url),
       join(scripts, "release-reuse-policy.json"),
+      f.historical.policyBytes,
     );
     change?.(directory, scripts);
     const workflow = readFileSync(
@@ -1785,9 +1898,7 @@ async function actualInlinePublisher(
     "",
   );
   expect(body).not.toMatch(/^import /mu);
-  const policy = readFileSync(
-    new URL("../scripts/release-reuse-policy.json", import.meta.url),
-  );
+  const policy = f.historical.policyBytes;
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH,
     SYSTEMROOT: process.env.SystemRoot,
@@ -1904,7 +2015,7 @@ describe("controlled real release orchestration (not release qualification)", ()
         "-m",
         "fictional all-selected source",
       ]);
-      // Only future-shaped preparation is exercised. No future Core runtime or
+      // Only synthetic all-selected preparation is exercised. No Core runtime or
       // public-consumer compatibility is claimed by these unsigned archives.
       const prepared = await controlledPrepare(f, undefined, true);
       expect(prepared.manifest.packages.map(({ publish }) => publish)).toEqual([
@@ -1943,9 +2054,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       expect(sealed.outputs).toEqual({
         manifest_digest: digest(readFileSync(prepared.manifestPath)),
         policy_digest: prepared.manifest.registryPolicySha256,
-        policy_base64: readFileSync(
-          new URL("../scripts/release-reuse-policy.json", import.meta.url),
-        ).toString("base64"),
+        policy_base64: f.historical.policyBytes.toString("base64"),
         reuse_required: "false",
       });
     } finally {
@@ -1961,7 +2070,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       mkdirSync(output);
       const eventsBefore = f.consumerEvents.length;
       const result = await withoutExplicitNpm(() =>
-        runPublicConsumer(prepared.manifest, { output }, f.seams),
+        f.registry.runPublicConsumer(prepared.manifest, { output }, f.seams),
       );
       expect(f.consumerEvents.slice(eventsBefore)).toEqual([
         "aws-metadata",
@@ -2094,7 +2203,11 @@ describe("controlled real release orchestration (not release qualification)", ()
         const callsBefore = f.calls.length;
         await withoutExplicitNpm(async () => {
           await expect(
-            runPublicConsumer(prepared.manifest, { output }, f.seams),
+            f.registry.runPublicConsumer(
+              prepared.manifest,
+              { output },
+              f.seams,
+            ),
           ).rejects.toThrow(error);
         });
         const beforeInstall =
@@ -2203,7 +2316,7 @@ describe("controlled real release orchestration (not release qualification)", ()
         runAttempt: 2,
       };
       const preflight = await withoutExplicitNpm(() =>
-        preflightRegistry(prepared.manifest, options, f.seams),
+        f.registry.preflightRegistry(prepared.manifest, options, f.seams),
       );
       expect(preflight.decisions).toEqual(
         prepared.manifest.packages.map(({ name, version, publish }) => ({
@@ -2215,7 +2328,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       const callsBefore = f.calls.length;
       await withoutExplicitNpm(async () => {
         await expect(
-          verifyRegistryRelease(
+          f.registry.verifyRegistryRelease(
             prepared.manifest,
             { ...options, output: join(f.root, "postflight-proof") },
             f.seams,
@@ -2240,9 +2353,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       expect(sealed.outputs).toEqual({
         manifest_digest: digest(readFileSync(prepared.manifestPath)),
         policy_digest: prepared.manifest.registryPolicySha256,
-        policy_base64: readFileSync(
-          new URL("../scripts/release-reuse-policy.json", import.meta.url),
-        ).toString("base64"),
+        policy_base64: f.historical.policyBytes.toString("base64"),
         reuse_required: "true",
       });
       for (const fault of [
@@ -2294,7 +2405,7 @@ describe("controlled real release orchestration (not release qualification)", ()
             : fault === "source-identity"
               ? "prepared manifest does not match the current approved checkout"
               : fault === "policy-drift"
-                ? "Release inventory changed during sealing"
+                ? "registry reuse policy digest differs"
                 : fault === "tar-bytes"
                   ? "prepared artifact is not the original regular file"
                   : "release output inventory does not match the package manifest",
@@ -2316,7 +2427,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       const callsBefore = f.calls.length;
       const consumerInputsBefore = f.state.consumerDependencies.length;
       const result = await withoutExplicitNpm(() =>
-        verifyRegistryRelease(
+        f.registry.verifyRegistryRelease(
           prepared.manifest,
           {
             root: f.root,
@@ -2438,7 +2549,7 @@ describe("controlled real release orchestration (not release qualification)", ()
         const callsBefore = f.calls.length;
         await withoutExplicitNpm(async () => {
           await expect(
-            verifyRegistryRelease(
+            f.registry.verifyRegistryRelease(
               prepared.manifest,
               {
                 root: f.root,
@@ -2509,7 +2620,11 @@ describe("controlled real release orchestration (not release qualification)", ()
         const output = join(f.root, "preflight-" + fault);
         await withoutExplicitNpm(async () => {
           await expect(
-            preflightRegistry(prepared.manifest, { ...base, output }, f.seams),
+            f.registry.preflightRegistry(
+              prepared.manifest,
+              { ...base, output },
+              f.seams,
+            ),
           ).rejects.toThrow();
         });
         expect(existsSync(join(output, "preflight.json"))).toBe(false);
@@ -2526,7 +2641,7 @@ describe("controlled real release orchestration (not release qualification)", ()
       const prepared = await controlledPrepare(f);
       const output = join(f.root, "publisher-preflight");
       await withoutExplicitNpm(() =>
-        preflightRegistry(
+        f.registry.preflightRegistry(
           prepared.manifest,
           {
             root: f.root,

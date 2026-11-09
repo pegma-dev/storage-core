@@ -593,8 +593,11 @@ async function preparedSchema2() {
   );
   const gitCommit = run(git, ["rev-parse", "HEAD"], root);
   const { policy, sha256: registryPolicySha256 } = await loadReusePolicy();
+  const selectedName = "@pegma/storage-dynamodb";
   const packages: PreparedRecord[] = [];
   for (const entry of policy.packages) {
+    // A current reuse policy can also contain the source-selected package.
+    if (entry.name === selectedName) continue;
     const bytes = readFileSync(
       new URL(
         `./fixtures/release-registry/${entry.directory}-${entry.version}.tgz`,
@@ -638,7 +641,7 @@ async function preparedSchema2() {
   const tarball = `pegma-storage-dynamodb-${version}.tgz`;
   writeFileSync(join(output, tarball), bytes);
   packages.push({
-    name: "@pegma/storage-dynamodb",
+    name: selectedName,
     version,
     directory: "storage-dynamodb",
     tarball,
@@ -840,6 +843,18 @@ describe("selected-source schema2 archives", () => {
         expectedManifestSha256,
       });
       expect(actual).toEqual(f.manifest);
+      expect(f.manifest.packages.map(({ name }) => name)).toEqual(
+        RELEASE_PACKAGES.map(({ name }) => name),
+      );
+      expect(f.manifest.registryPolicySha256).toBe(
+        createHash("sha256")
+          .update(
+            readFileSync(
+              new URL("../scripts/release-reuse-policy.json", import.meta.url),
+            ),
+          )
+          .digest("hex"),
+      );
       expect(f.manifest.packages.map(({ publish }) => publish)).toEqual([
         false,
         false,
