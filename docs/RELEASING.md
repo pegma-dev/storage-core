@@ -7,10 +7,11 @@ below is an explicit first-package exception, not a runtime release path.
 
 ## Current versions and source ownership
 
-Core and Azure are published at `0.4.0`; D1 at `0.4.1`. DynamoDB `0.4.5` is the
+Core and Azure are published at `0.4.0`; D1 at `0.4.6`. DynamoDB `0.4.5` is the
 qualified trusted runtime; `0.4.2` remains published registration-only metadata.
-D1 `0.4.6` is the current unpublished candidate for optional concurrent keyed-read
-batching. Its release and host request-budget acceptance remain separate gates.
+D1 `0.4.7` is the current unpublished candidate for optional concurrent keyed and
+whole-partition read batching. Its release and host request-budget acceptance
+remain separate gates.
 The `v0.4.3` release attempt failed its npm-version check
 before preparation: no runtime archive was produced or published. Its signed
 tag remains immutable; preserve the release as a failed attempt. The `v0.4.4`
@@ -27,7 +28,7 @@ reused the original prepared artifact and made no new npm uploads. The accepted 
 belongs to attempt 1, whose visibility check failed; final registry cryptographic,
 source and isolated public-consumer verification completed during recovery.
 
-For D1 `0.4.6`, schema 2 selects only the new D1 source artifact and must reuse
+For D1 `0.4.7`, schema 2 selects only the new D1 source artifact and must reuse
 the original qualified Core `0.4.0`, Azure `0.4.0` and DynamoDB `0.4.5` registry
 archives. Unselected workspace builds are not substitutes for those bytes.
 The reviewed reuse policy must bind their original source and writer identities.
@@ -37,8 +38,9 @@ no Core or host upgrade is implied.
 
 Versions are independently assigned but release tags share a repository-wide
 namespace. Never reuse or move a tag/version, including failed publication or
-registration versions. DynamoDB `v0.4.5` is qualified; the next D1 release is
-planned as `v0.4.6` and requires its own current-head review and release gates.
+registration versions. DynamoDB `v0.4.5` and D1 `v0.4.6` are qualified; the next
+D1 release is planned as `v0.4.7` and requires its own current-head review and
+release gates.
 
 A release run uses the workflow at its tagged commit, as documented in
 [workflow triggers](https://docs.github.com/en/actions/concepts/workflows-and-actions/workflows#workflow-triggers)
@@ -75,12 +77,12 @@ record; never install it for a backend/host proof or describe it as the
 latest runtime. Inspect actual registry bytes/dist-tags afterward. No GitHub
 v0.4.2 release is needed.
 
-For the D1 `0.4.6` candidate, verify trusted publishing and package/account
+For the D1 `0.4.7` candidate, verify trusted publishing and package/account
 restrictions again. After its reviewed source passes full gates and merges,
-create and verify its signed annotated `v0.4.6` tag on `origin/main`; create its
+create and verify its signed annotated `v0.4.7` tag on `origin/main`; create its
 GitHub release only when this configuration is complete. Do not move or reuse
 the signed `v0.4.3` or `v0.4.4` tags; retain their releases as failed attempts.
-Never manually publish the real `0.4.6` artifact
+Never manually publish the real `0.4.7` artifact
 first: immutable bytes with missing trusted
 provenance cannot later be repaired by a skip. Registration `0.4.2` remains immutable
 and explicitly outside runtime qualification.
@@ -173,7 +175,7 @@ It imports public roots, executes published Core conformance against DynamoDB
 Local, and proves real StorageError/ConcurrencyError identity with Core `0.4.0`.
 The fixture is local synthetic backend evidence, not a deployed AWS claim.
 
-For D1 `0.4.6`, that generic consumer proves only a D1 import; its DynamoDB
+For D1 `0.4.7`, that generic consumer proves only a D1 import; its DynamoDB
 conformance run does not exercise the D1 adapter. Before merge or publication,
 owner acceptance additionally requires an isolated selected D1 tarball plus
 genuine canonical registry Core `0.4.0`, with no aliases, overrides or workspace

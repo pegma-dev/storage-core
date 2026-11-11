@@ -308,8 +308,8 @@ export interface CloudflareD1StoreOptions {
   readonly createSchemaIfMissing?: boolean;
 
   /**
-   * Coalesce concurrent public get/getVersioned calls into read-only batches.
-   * Defaults to 1, retaining direct keyed reads. Must be an integer from 1
+   * Coalesce concurrent public keyed and partition reads into read-only batches.
+   * Defaults to 1, retaining direct reads. Must be an integer from 1
    * through 512. Larger values suit bounded small records, not arbitrary rows.
    *
    * This limits each physical batch, not the total pending queue. Opt-in
@@ -320,12 +320,20 @@ export interface CloudflareD1StoreOptions {
   readonly readBatchSize?: number;
 }
 
-interface PendingRead {
-  readonly partition: string;
-  readonly id: string;
-  readonly resolve: (row: PhysicalRow | null) => void;
-  readonly reject: (reason: unknown) => void;
-}
+type PendingRead =
+  | {
+      readonly kind: "keyed";
+      readonly partition: string;
+      readonly id: string;
+      readonly resolve: (row: PhysicalRow | null) => void;
+      readonly reject: (reason: unknown) => void;
+    }
+  | {
+      readonly kind: "partition";
+      readonly partition: string;
+      readonly resolve: (rows: RecordRow[]) => void;
+      readonly reject: (reason: unknown) => void;
+    };
 
 function recordRow(row: PhysicalRow | null): RecordRow | null {
   return row === null || row.deleted === 1 || row.record_json === null
@@ -334,41 +342,73 @@ function recordRow(row: PhysicalRow | null): RecordRow | null {
 }
 
 /**
- * Batch results are positional: validate every slot and row before assigning
- * any result to its caller. These runtime shape checks are opt-in only.
- * Direct first<PhysicalRow>() keeps its existing typed-binding behavior;
- * SELECT_ONE's cast and the STRICT schema enforce these row types in real D1.
+ * Validate all transport slots before resolving any caller. JSON and collection
+ * codecs still run separately in each public reader, after this shared batch.
+ * Direct first/all calls retain their existing typed-binding behavior.
  */
-function batchRows(
-  results: CloudflareD1Result<PhysicalRow>[],
-  expected: number,
-): (PhysicalRow | null)[] {
-  if (!Array.isArray(results) || results.length !== expected) {
-    throw new StorageError("D1 returned an invalid keyed-read batch.");
+function batchSettlements(
+  results: CloudflareD1Result<unknown>[],
+  jobs: readonly PendingRead[],
+): (() => void)[] {
+  if (!Array.isArray(results) || results.length !== jobs.length) {
+    const kind = jobs.every((job) => job.kind === "keyed")
+      ? "keyed-read"
+      : jobs.every((job) => job.kind === "partition")
+        ? "partition-read"
+        : "mixed-read";
+    throw new StorageError(`D1 returned an invalid ${kind} batch.`);
   }
-  return Array.from(results, (result) => {
+  return Array.from(results, (result, index) => {
+    const job = jobs[index]!;
     if (
       result === null ||
       typeof result !== "object" ||
-      !Array.isArray(result.results) ||
-      result.results.length > 1
+      !Array.isArray(result.results)
     ) {
-      throw new StorageError("D1 returned an invalid keyed-read result.");
+      throw new StorageError(`D1 returned an invalid ${job.kind}-read result.`);
     }
-    if (result.results.length === 0) return null;
-    const row = result.results[0];
-    if (
-      row === undefined ||
-      row === null ||
-      typeof row !== "object" ||
-      typeof row.version !== "string" ||
-      row.version.length === 0 ||
-      (row.deleted !== 0 && row.deleted !== 1) ||
-      (row.record_json !== null && typeof row.record_json !== "string")
-    ) {
-      throw new StorageError("D1 returned an invalid keyed-read row.");
+    if (job.kind === "keyed") {
+      const resolve = job.resolve;
+      if (result.results.length > 1)
+        throw new StorageError("D1 returned an invalid keyed-read result.");
+      if (result.results.length === 0) return () => resolve(null);
+      const row: unknown = result.results[0];
+      if (
+        row === null ||
+        typeof row !== "object" ||
+        !("version" in row) ||
+        typeof row.version !== "string" ||
+        row.version.length === 0 ||
+        !("deleted" in row) ||
+        (row.deleted !== 0 && row.deleted !== 1) ||
+        !("record_json" in row) ||
+        (row.record_json !== null && typeof row.record_json !== "string")
+      ) {
+        throw new StorageError("D1 returned an invalid keyed-read row.");
+      }
+      const physical: PhysicalRow = {
+        record_json: row.record_json,
+        version: row.version,
+        deleted: row.deleted,
+      };
+      return () => resolve(physical);
     }
-    return row;
+    const rows = Array.from(result.results, (row: unknown): RecordRow => {
+      if (
+        row === null ||
+        typeof row !== "object" ||
+        !("version" in row) ||
+        typeof row.version !== "string" ||
+        row.version.length === 0 ||
+        !("record_json" in row) ||
+        typeof row.record_json !== "string"
+      ) {
+        throw new StorageError("D1 returned an invalid partition-read row.");
+      }
+      return { record_json: row.record_json, version: row.version };
+    });
+    const resolve = job.resolve;
+    return () => resolve(rows);
   });
 }
 
@@ -557,15 +597,15 @@ export function createCloudflareD1Store(
       while (pendingReads.length > 0) {
         const jobs = pendingReads.splice(0, readBatchSize);
         try {
-          const results = await database.batch<PhysicalRow>(
+          const results = await database.batch<unknown>(
             jobs.map((job) =>
-              database.prepare(SELECT_ONE).bind(job.partition, job.id),
+              job.kind === "keyed"
+                ? database.prepare(SELECT_ONE).bind(job.partition, job.id)
+                : database.prepare(SELECT_PARTITION).bind(job.partition),
             ),
           );
-          const rows = batchRows(results, jobs.length);
-          for (const [index, job] of jobs.entries()) {
-            job.resolve(rows[index]!);
-          }
+          const settlements = batchSettlements(results, jobs);
+          for (const settle of settlements) settle();
         } catch (error) {
           for (const job of jobs) job.reject(error);
         }
@@ -582,7 +622,15 @@ export function createCloudflareD1Store(
   ): Promise<PhysicalRow | null> {
     await ensureSchema();
     return new Promise<PhysicalRow | null>((resolve, reject) => {
-      pendingReads.push({ partition, id, resolve, reject });
+      pendingReads.push({ kind: "keyed", partition, id, resolve, reject });
+      scheduleReadBatch();
+    });
+  }
+
+  async function queuedPartitionRead(partition: string): Promise<RecordRow[]> {
+    await ensureSchema();
+    return new Promise<RecordRow[]>((resolve, reject) => {
+      pendingReads.push({ kind: "partition", partition, resolve, reject });
       scheduleReadBatch();
     });
   }
@@ -635,6 +683,10 @@ export function createCloudflareD1Store(
       async function listVersioned(
         partition: string,
       ): Promise<VersionedRecord<T>[]> {
+        if (readBatchSize > 1) {
+          const rows = await queuedPartitionRead(partitionKey(partition));
+          return rows.map(decodeRow);
+        }
         await ensureSchema();
         const result = await database
           .prepare(SELECT_PARTITION)

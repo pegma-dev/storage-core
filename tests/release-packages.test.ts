@@ -97,7 +97,7 @@ describe("release package metadata", () => {
     expect(manifests.map(({ name, version }) => ({ name, version }))).toEqual([
       { name: "@pegma/storage-core", version: "0.4.0" },
       { name: "@pegma/storage-azure-tables", version: "0.4.0" },
-      { name: "@pegma/storage-cloudflare-d1", version: "0.4.6" },
+      { name: "@pegma/storage-cloudflare-d1", version: "0.4.7" },
       { name: "@pegma/storage-dynamodb", version: "0.4.5" },
     ]);
     for (const adapter of manifests.slice(1)) {
@@ -917,7 +917,7 @@ describe("selected-source schema2 archives", () => {
         },
         {
           name: "@pegma/storage-cloudflare-d1",
-          version: "0.4.6",
+          version: "0.4.7",
           publish: true,
         },
         { name: "@pegma/storage-dynamodb", version: "0.4.5", publish: false },

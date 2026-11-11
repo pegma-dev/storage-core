@@ -219,10 +219,10 @@ and what you decode is what the last writer decided.
 | `@pegma/storage-cloudflare-d1` | available; passes the same conformance run |
 | `@pegma/storage-dynamodb`      | available; passes the same conformance run |
 
-Published versions are Core `0.4.0`, Azure Tables `0.4.0`, D1 `0.4.1` and the
+Published versions are Core `0.4.0`, Azure Tables `0.4.0`, D1 `0.4.6` and the
 [qualified DynamoDB `0.4.5` runtime](https://github.com/pegma-dev/storage-core/releases/tag/v0.4.5).
-D1 `0.4.6` remains an unpublished candidate for optional concurrent keyed-read
-batching, with direct reads still the default; see its
+D1 `0.4.7` is the unpublished candidate for optional concurrent keyed and
+whole-partition read batching, with direct reads still the default; see its
 [package README](packages/storage-cloudflare-d1/README.md). This candidate does
 not establish a released adapter or live Workers Free host acceptance.
 

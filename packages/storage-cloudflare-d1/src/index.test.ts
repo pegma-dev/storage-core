@@ -107,12 +107,16 @@ function observedDatabase(hooks: ReadBatchHooks = {}) {
   const readBatchSizes: number[] = [];
   let preparations = 0;
   let directKeyReads = 0;
+  let directPartitionReads = 0;
   let schemaBatches = 0;
   let activeReadBatches = 0;
   let maximumReadBatches = 0;
   const keyed = (sql: string) =>
     sql.trimStart().startsWith("SELECT") &&
     sql.includes("WHERE partition_key = ? AND row_key = ?");
+  const partitionRead = (sql: string) =>
+    sql.trimStart().startsWith("SELECT") &&
+    sql.includes("WHERE partition_key = ? AND deleted = 0");
   const wrap = (
     original: D1PreparedStatement,
     sql: string,
@@ -125,6 +129,7 @@ function observedDatabase(hooks: ReadBatchHooks = {}) {
         if (property === "first" || property === "all" || property === "run") {
           return (...args: unknown[]) => {
             if (keyed(sql)) directKeyReads += 1;
+            if (partitionRead(sql)) directPartitionReads += 1;
             return Reflect.apply(method, target, args);
           };
         }
@@ -143,7 +148,9 @@ function observedDatabase(hooks: ReadBatchHooks = {}) {
       const actual = statements.map((statement) => originals.get(statement));
       if (actual.some((item) => item === undefined))
         throw new Error("Unobserved prepared statement.");
-      const read = actual.every((item) => keyed(item!.sql));
+      const read = actual.every(
+        (item) => keyed(item!.sql) || partitionRead(item!.sql),
+      );
       if (!read) {
         if (actual[0]?.sql.trimStart().startsWith("CREATE")) {
           schemaBatches += 1;
@@ -178,6 +185,7 @@ function observedDatabase(hooks: ReadBatchHooks = {}) {
     readBatchSizes,
     preparations: () => preparations,
     directKeyReads: () => directKeyReads,
+    directPartitionReads: () => directPartitionReads,
     schemaBatches: () => schemaBatches,
     maximumReadBatches: () => maximumReadBatches,
   };
@@ -878,6 +886,361 @@ describe("D1 opt-in keyed read batching", () => {
     );
     expect(observed.readBatchSizes).toEqual([1]);
   });
+});
+
+describe("D1 mixed keyed and partition reads", () => {
+  it.each([undefined, 1])(
+    "retains direct keyed and partition calls for readBatchSize %s",
+    async (readBatchSize) => {
+      await collection().put(widget("one"));
+      const observed = observedDatabase();
+      const records = createCloudflareD1Store({
+        database: observed.database,
+        createSchemaIfMissing: false,
+        ...(readBatchSize === undefined ? {} : { readBatchSize }),
+      }).collection(widgets);
+      const [value, versioned, values, versions] = await bounded(
+        Promise.all([
+          records.get({ partition: "tools", id: "one" }),
+          records.getVersioned({ partition: "tools", id: "one" }),
+          records.list("tools"),
+          records.listVersioned("tools"),
+        ]),
+      );
+      expect(value).toEqual(widget("one"));
+      expect(versioned).toEqual({ value: widget("one"), version: "1" });
+      expect(values).toEqual([widget("one")]);
+      expect(versions).toEqual([{ value: widget("one"), version: "1" }]);
+      expect(observed.directKeyReads()).toBe(2);
+      expect(observed.directPartitionReads()).toBe(2);
+      expect(observed.readBatchSizes).toEqual([]);
+    },
+  );
+
+  it("coalesces three keyed reads and one whole partition read into one real batch", async () => {
+    const otherWidgets = { ...widgets, name: "d1_mixed_other_widgets" };
+    const seed = freshStore();
+    await seed.collection(widgets).put(widget("one", "first collection"));
+    await seed.collection(widgets).put(widget("two"));
+    await seed.collection(widgets).put(widget("removed"));
+    await seed
+      .collection(widgets)
+      .delete({ partition: "tools", id: "removed" });
+    await seed.collection(otherWidgets).put(widget("one", "other collection"));
+    await env.DB.prepare(
+      "UPDATE RECORDS SET version = ? WHERE partition_key = ? AND row_key = ?",
+    )
+      .bind("9007199254740993", "d1_targeted_widgets:tools", "one")
+      .run();
+    const observed = observedDatabase();
+    const store = createCloudflareD1Store({
+      database: observed.database,
+      createSchemaIfMissing: false,
+      readBatchSize: 512,
+    });
+    const records = store.collection(widgets);
+    const others = store.collection(otherWidgets);
+    const [first, other, removed, rows] = await bounded(
+      Promise.all([
+        records.getVersioned({ partition: "tools", id: "one" }),
+        others.get({ partition: "tools", id: "one" }),
+        records.getVersioned({ partition: "tools", id: "removed" }),
+        records.listVersioned("tools"),
+      ]),
+    );
+    expect(first).toEqual({
+      value: widget("one", "first collection"),
+      version: "9007199254740993",
+    });
+    expect(other).toEqual(widget("one", "other collection"));
+    expect(removed).toBeNull();
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(
+      expect.arrayContaining([
+        {
+          value: widget("one", "first collection"),
+          version: "9007199254740993",
+        },
+        { value: widget("two"), version: "1" },
+      ]),
+    );
+    expect(observed.readBatchSizes).toEqual([4]);
+    expect(observed.directKeyReads()).toBe(0);
+    expect(observed.directPartitionReads()).toBe(0);
+    if (first === null) throw new Error("Missing genuine keyed version.");
+    await records.put(widget("one", "updated"));
+    expect(
+      await records.putIfUnchanged(widget("one", "stale"), first.version),
+    ).toBe(false);
+    const [latest, empty, values] = await bounded(
+      Promise.all([
+        records.getVersioned({ partition: "tools", id: "one" }),
+        others.listVersioned("empty"),
+        records.list("tools"),
+      ]),
+    );
+    expect(latest).toEqual({
+      value: widget("one", "updated"),
+      version: "9007199254740994",
+    });
+    expect(empty).toEqual([]);
+    expect(values).toHaveLength(2);
+    expect(values).toEqual(
+      expect.arrayContaining([widget("one", "updated"), widget("two")]),
+    );
+    expect(observed.readBatchSizes).toEqual([4, 3]);
+    expect(observed.maximumReadBatches()).toBe(1);
+  });
+
+  it("counts mixed statements rather than returned rows against the batch bound", async () => {
+    const populated = [widget("one"), widget("two"), widget("three")];
+    for (const value of populated) await collection().put(value);
+    const observed = observedDatabase();
+    const records = createCloudflareD1Store({
+      database: observed.database,
+      createSchemaIfMissing: false,
+      readBatchSize: 2,
+    }).collection(widgets);
+    const [missing, versions, otherMissing, values, stillMissing] =
+      await bounded(
+        Promise.all([
+          records.get({ partition: "tools", id: "absent" }),
+          records.listVersioned("tools"),
+          records.getVersioned({ partition: "other", id: "absent" }),
+          records.list("tools"),
+          records.get({ partition: "tools", id: "absent" }),
+        ]),
+      );
+    expect([missing, otherMissing, stillMissing]).toEqual([null, null, null]);
+    expect(versions).toHaveLength(populated.length);
+    expect(versions).toEqual(
+      expect.arrayContaining(
+        populated.map((value) => ({ value, version: "1" })),
+      ),
+    );
+    expect(values).toHaveLength(populated.length);
+    expect(values).toEqual(expect.arrayContaining(populated));
+    expect(observed.readBatchSizes).toEqual([2, 2, 1]);
+    expect(observed.directKeyReads()).toBe(0);
+    expect(observed.directPartitionReads()).toBe(0);
+    expect(observed.maximumReadBatches()).toBe(1);
+  });
+
+  it("settles mixed transport failures and recovers without direct fallback", async () => {
+    await collection().put(widget("one"));
+    const failure = new Error("Synthetic mixed read transport failure.");
+    const observed = observedDatabase({
+      afterReadBatch(call, results) {
+        if (call === 1) throw failure;
+        return results;
+      },
+    });
+    const records = createCloudflareD1Store({
+      database: observed.database,
+      createSchemaIfMissing: false,
+      readBatchSize: 512,
+    }).collection(widgets);
+    const outcomes = await bounded(
+      Promise.allSettled([
+        records.get({ partition: "tools", id: "one" }),
+        records.listVersioned("tools"),
+      ]),
+    );
+    expect(outcomes.map((result) => result.status)).toEqual([
+      "rejected",
+      "rejected",
+    ]);
+    for (const outcome of outcomes)
+      if (outcome.status === "rejected") expect(outcome.reason).toBe(failure);
+    expect(
+      await bounded(
+        Promise.all([
+          records.get({ partition: "tools", id: "one" }),
+          records.listVersioned("tools"),
+        ]),
+      ),
+    ).toEqual([widget("one"), [{ value: widget("one"), version: "1" }]]);
+    expect(observed.readBatchSizes).toEqual([2, 2]);
+    expect(observed.directKeyReads()).toBe(0);
+    expect(observed.directPartitionReads()).toBe(0);
+  });
+
+  it.each(["codec", "json"] as const)(
+    "confines a partition %s failure to its caller in a mixed batch",
+    async (fault) => {
+      await collection().put(widget("one"));
+      const failure = new Error("Synthetic partition decoder failure.");
+      const broken = {
+        ...widgets,
+        codec: {
+          ...widgets.codec,
+          decode(record: Parameters<typeof widgets.codec.decode>[0]): Widget {
+            if (fault === "codec") throw failure;
+            return widgets.codec.decode(record);
+          },
+        },
+      };
+      const observed = observedDatabase({
+        afterReadBatch(call, results) {
+          if (fault !== "json" || call !== 1) return results;
+          return results.map((result, index) =>
+            index !== 1
+              ? result
+              : {
+                  ...result,
+                  results: result.results.map((row) => ({
+                    ...(row as Record<string, unknown>),
+                    record_json: "{",
+                  })),
+                },
+          );
+        },
+      });
+      const store = createCloudflareD1Store({
+        database: observed.database,
+        createSchemaIfMissing: false,
+        readBatchSize: 512,
+      });
+      const [keyed, failed, listed] = await bounded(
+        Promise.allSettled([
+          store.collection(widgets).get({ partition: "tools", id: "one" }),
+          store.collection(broken).listVersioned("tools"),
+          store.collection(widgets).list("tools"),
+        ]),
+      );
+      expect(failed.status).toBe("rejected");
+      if (failed.status === "rejected") {
+        if (fault === "codec") expect(failed.reason).toBe(failure);
+        else expect(failed.reason).toBeInstanceOf(SyntaxError);
+      }
+      if (keyed.status !== "fulfilled" || listed.status !== "fulfilled")
+        throw new Error("Valid mixed readers were rejected.");
+      expect(keyed.value).toEqual(widget("one"));
+      expect(listed.value).toEqual([widget("one")]);
+      expect(keyed.value).not.toBe(listed.value[0]);
+      expect(observed.readBatchSizes).toEqual([3]);
+      expect(observed.directPartitionReads()).toBe(0);
+    },
+  );
+
+  describe.each(["mixed", "partition-only"] as const)(
+    "%s partition transport validation",
+    (composition) => {
+      it.each([
+        "short",
+        "extra",
+        "sparse",
+        "null-slot",
+        "rows-not-array",
+        "sparse-row",
+        "null-row",
+        "missing-version",
+        "empty-version",
+        "numeric-version",
+        "missing-json-field",
+        "null-json-field",
+        "invalid-json-field",
+      ] as const)(
+        "rejects %s after a real D1 response and recovers without fallback",
+        async (fault) => {
+          await collection().put(widget("one"));
+          let faultApplied = false;
+          const observed = observedDatabase({
+            afterReadBatch(call, results) {
+              if (call !== 1) return results;
+              faultApplied = true;
+              // Copy the genuine backend response before changing its transport
+              // shape. Stored rows and the forwarding binding remain untouched.
+              const changed = results.map((result) => ({
+                ...result,
+                results: [...result.results],
+              }));
+              if (fault === "short") return changed.slice(1);
+              if (fault === "extra") return [...changed, changed[1]!];
+              if (fault === "sparse")
+                return new Array<CloudflareD1Result<unknown>>(changed.length);
+              const partition = changed[1];
+              if (partition === undefined)
+                throw new Error("Missing genuine partition result.");
+              if (fault === "null-slot") {
+                expect(Reflect.set(changed, 1, null)).toBe(true);
+              } else if (fault === "rows-not-array") {
+                expect(Reflect.set(partition, "results", null)).toBe(true);
+              } else if (fault === "sparse-row") {
+                expect(Reflect.deleteProperty(partition.results, "0")).toBe(
+                  true,
+                );
+              } else if (fault === "null-row") {
+                expect(Reflect.set(partition.results, 0, null)).toBe(true);
+              } else {
+                const original = partition.results[0];
+                if (original === null || typeof original !== "object")
+                  throw new Error("Missing genuine partition row.");
+                const row = { ...original };
+                partition.results[0] = row;
+                if (fault === "missing-version") {
+                  expect(Reflect.deleteProperty(row, "version")).toBe(true);
+                } else if (fault === "empty-version") {
+                  expect(Reflect.set(row, "version", "")).toBe(true);
+                } else if (fault === "numeric-version") {
+                  expect(Reflect.set(row, "version", 1)).toBe(true);
+                } else if (fault === "missing-json-field") {
+                  expect(Reflect.deleteProperty(row, "record_json")).toBe(true);
+                } else {
+                  expect(
+                    Reflect.set(
+                      row,
+                      "record_json",
+                      fault === "null-json-field" ? null : 7,
+                    ),
+                  ).toBe(true);
+                }
+              }
+              return changed;
+            },
+          });
+          const records = createCloudflareD1Store({
+            database: observed.database,
+            createSchemaIfMissing: false,
+            readBatchSize: 512,
+          }).collection(widgets);
+          const first = () =>
+            composition === "mixed"
+              ? records.get({ partition: "tools", id: "one" })
+              : records.list("tools");
+          const outcomes = await bounded(
+            Promise.allSettled([first(), records.listVersioned("tools")]),
+          );
+          expect(faultApplied).toBe(true);
+          expect(outcomes.map((result) => result.status)).toEqual([
+            "rejected",
+            "rejected",
+          ]);
+          for (const outcome of outcomes) {
+            if (outcome.status !== "rejected")
+              throw new Error("Malformed batch settled a reader successfully.");
+            expect(outcome.reason).toBeInstanceOf(StorageError);
+            if (fault === "short" || fault === "extra")
+              expect(outcome.reason.message).toBe(
+                `D1 returned an invalid ${composition === "mixed" ? "mixed-read" : "partition-read"} batch.`,
+              );
+          }
+          expect(
+            await bounded(
+              Promise.all([first(), records.listVersioned("empty")]),
+            ),
+          ).toEqual([
+            composition === "mixed" ? widget("one") : [widget("one")],
+            [],
+          ]);
+          expect(observed.readBatchSizes).toEqual([2, 2]);
+          expect(observed.directKeyReads()).toBe(0);
+          expect(observed.directPartitionReads()).toBe(0);
+          expect(observed.maximumReadBatches()).toBe(1);
+        },
+      );
+    },
+  );
 });
 
 describe("D1 schema initialization", () => {
