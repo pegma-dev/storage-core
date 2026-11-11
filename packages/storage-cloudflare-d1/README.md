@@ -83,11 +83,11 @@ Replicated or session-based reads are incompatible with this adapter. Even a
 session that starts on the primary may use replicas for subsequent reads, so
 the adapter deliberately does not use the Sessions API.
 
-## Optional concurrent keyed-read batching
+## Optional concurrent read batching
 
-The default `readBatchSize: 1` retains direct keyed reads. To coalesce
-concurrent public `get` and `getVersioned` calls, opt in when constructing a
-Store inside the request:
+The default `readBatchSize: 1` retains direct keyed and partition reads. To
+coalesce concurrent public `get`, `getVersioned`, `list` and `listVersioned`
+calls, opt in when constructing a Store inside the request:
 
 ```ts
 const store = createCloudflareD1Store({
@@ -98,7 +98,7 @@ const store = createCloudflareD1Store({
 
 `readBatchSize` must be a safe integer from 1 through 512. This is an adapter
 tuning bound, not a Cloudflare batch-size limit. Calls queued together are
-sent as at most that many prepared keyed statements in one real D1 batch.
+sent as at most that many prepared read statements in one real D1 batch.
 There is at most one read batch in flight per Store, and a partial batch runs
 without waiting for more calls. Collection handles on that Store share the
 queue; separate Store instances do not. Use a request-scoped Store rather
@@ -106,7 +106,9 @@ than sharing the queue across Worker requests.
 
 `readBatchSize` bounds each D1 batch, not the total pending read requests.
 The adapter has no total pending-queue cap. Callers must bound their concurrent
-read waves and the Store's lifetime within the request.
+read waves and the Store's lifetime within the request. Partition lists still
+return every live row: the batch bound counts statements, not result rows or
+bytes. Batching does not paginate or truncate a list.
 
 Only calls that actually reach storage concurrently can coalesce. Finish
 asynchronous key preparation before starting a parallel read wave if the
@@ -115,8 +117,8 @@ There is no caching or same-key deduplication, and each caller decodes its
 own value. A batch failure rejects all reads in that batch; later calls can
 recover without an automatic fallback to individual requests.
 
-Writes, internal optimistic reads, partition lists, scans and transactions
-keep their existing paths. Batching does not add snapshot or read/write
+Writes, internal optimistic reads, scans and transactions keep their existing
+paths. Batching does not add snapshot or read/write
 ordering guarantees: retain version checks and current-state fences. A new
 read after an awaited write still reads the direct primary binding.
 
