@@ -351,9 +351,11 @@ function batchSettlements(
   jobs: readonly PendingRead[],
 ): (() => void)[] {
   if (!Array.isArray(results) || results.length !== jobs.length) {
-    const kind = jobs.some((job) => job.kind === "partition")
-      ? "mixed-read"
-      : "keyed-read";
+    const kind = jobs.every((job) => job.kind === "keyed")
+      ? "keyed-read"
+      : jobs.every((job) => job.kind === "partition")
+        ? "partition-read"
+        : "mixed-read";
     throw new StorageError(`D1 returned an invalid ${kind} batch.`);
   }
   return Array.from(results, (result, index) => {

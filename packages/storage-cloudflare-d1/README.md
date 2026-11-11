@@ -3,10 +3,11 @@
 Cloudflare D1 adapter for
 [`@pegma/storage-core`](https://www.npmjs.com/package/@pegma/storage-core).
 
-The published release remains `0.4.1`. This source is the unpublished `0.4.6`
-candidate for optional concurrent keyed-read batching and retains exact Core
-`0.4.0`. Its review, registry qualification and complete host request-budget
-acceptance remain pending; source tests alone do not establish live Free usage.
+Published `0.4.6` provides optional concurrent keyed-read batching. This source
+targets unpublished `0.4.7`, extending that queue to whole-partition reads while
+retaining exact Core `0.4.0`. Its review, registry qualification and complete host
+request-budget acceptance remain pending; source tests alone do not establish
+live Free usage.
 
 It stores every collection in one D1 database and one `RECORDS` data table.
 The physical partition key is `<collection>:<partition>` and the row key is

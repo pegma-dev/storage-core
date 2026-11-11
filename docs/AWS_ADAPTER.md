@@ -86,8 +86,9 @@ runtime pins it exactly. `0.4.2` is registration-only metadata under `bootstrap`
 not a usable adapter release. The qualified `0.4.5` runtime completed the reviewed
 signed-source and trusted-publisher flow.
 Existing repository-wide tags `v0.4.0`, `v0.4.1`, failed `v0.4.3` and failed
-`v0.4.4` must never be reused. The separate D1 `0.4.6` candidate remains
-unpublished and requires its own review and release qualification.
+`v0.4.4` must never be reused. D1 `0.4.6` is published; the separate D1
+`0.4.7` mixed-read batching candidate remains unpublished and requires its own
+review and release qualification.
 
 Unprivileged validation runs the full gates on Node 22 and 24 before preparation.
 Preparation depends on that validation and signed-release identity checks; it

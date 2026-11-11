@@ -102,8 +102,9 @@ preflight CLI entry with a module cycle (exit 13), before publication.
 Keep both signed tags immutable and retain their releases as failed attempts.
 `@pegma/storage-dynamodb@0.4.5` is now a
 [qualified trusted runtime](https://github.com/pegma-dev/storage-core/releases/tag/v0.4.5),
-retaining exact Core `0.4.0`. D1 `0.4.6` is the unpublished candidate for optional
-concurrent keyed-read batching; its default remains `readBatchSize: 1`.
+retaining exact Core `0.4.0`. Published D1 `0.4.6` provides opt-in keyed-read
+batching. D1 `0.4.7` is the unpublished candidate adding whole-partition reads
+to that queue; its default remains `readBatchSize: 1`.
 Its own review, release qualification and host Free-plan acceptance remain
 separate gates. See `docs/RELEASING.md` and the D1 package README.
 The port offers keyed access,
